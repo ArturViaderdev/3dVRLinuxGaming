@@ -1,0 +1,101 @@
+# vrlinux - configuracion por defecto (~/.config/vrlinux/default.conf)
+# vrlinux-config-version 6
+# Cada juego guarda su propio perfil en ~/.config/vrlinux/<Juego.exe>.conf con Ctrl+Shift+F9.
+# Los perfiles se recargan solos si los editas con el juego abierto.
+
+# ---------------------------------------------------------------- modo
+# vr     = inmersivo: la imagen llena todo el visor (por defecto)
+# screen = pantalla 3D gigante flotando delante de ti (cine 3D)
+# Ctrl+Shift+F10 cambia entre los dos en el juego.
+display = vr
+
+# Modo inmersivo: 1 = la camara del juego gira con tu cabeza | 0 = no gira (por defecto): la imagen
+# queda fija delante y miras dentro de ella. Ctrl+Shift+F11 lo activa/desactiva en el juego.
+head_look = 0
+
+# ---------------------------------------------------------------- girar la cabeza
+# shader = al girar la cabeza la camara del juego gira con ella (se dibuja asi en los shaders) y la
+#          imagen llena todo el visor. El stick derecho / raton siguen girando la camara como siempre.
+#          Lo que el juego no dibuja (fuera de su campo de vision) puede faltar en los bordes:
+#          sube el FOV del juego al maximo.
+# mouse  = la cabeza mueve un raton virtual (calibrar mouse_sens en cada juego)
+# none   = la camara no gira; la imagen queda fija en el mundo y miras dentro de ella
+look = shader
+# --- solo look = mouse:
+# 1 = mirar arriba/abajo con la cabeza tambien mueve la camara
+look_pitch = 1
+# Cuentas de raton por grado. CALIBRA esto en cada juego (Ctrl+Shift+F5/F6): gira la cabeza
+# 90 grados; si el mundo "se va" en el sentido del giro, sube el valor; si va al reves, bajalo.
+mouse_sens = 20
+# Limite de inclinacion de la camara (grados)
+pitch_limit = 80
+# El juego usa el eje Y del raton invertido
+invert_y = 0
+# Fotogramas que tarda el juego en aplicar el raton (0-4). Si al girar rapido el mundo "flota", prueba 1.
+look_latency = 0
+
+# ---------------------------------------------------------------- mover la cabeza
+# 1 = inclinarte, agacharte o acercarte mueve la camara del juego (paralaje real)
+positional = 1
+# Distancia maxima (metros) que se puede mover la cabeza desde el punto de recentrado
+positional_limit = 0.5
+
+# ---------------------------------------------------------------- geometria
+# FOV del juego en grados: PON EL MISMO VALOR que en las opciones del juego (cuanto mas alto, mejor).
+# Si el mundo parece "girar mas" que tu cabeza, el FOV no coincide: ajustalo con Ctrl+Shift+F1/F2.
+fov = 90
+# h = el FOV del juego es horizontal (la mayoria) | v = vertical (juegos Unity y algunos otros)
+fov_axis = h
+# Unidades del juego por metro: 1 casi todos los motores (Unity...), 100 Unreal Engine (centimetros).
+# Controla la fuerza del 3D: si todo parece de juguete (pequeno), bajalo; si gigante, subelo (Ctrl+Shift+F3/F4).
+world_scale = 1.0
+# Distancia (m) a la que se ve el HUD 2D (textos, mira). 0 = infinito (sin cambios). Ctrl+Shift+RePag/AvPag
+hud_distance = 0
+# Escala del HUD 2D hacia el centro (1 = igual; 0.7 = mas pequeno, mas facil de leer en VR).
+# Ojo: algunos juegos dibujan sombras como "2D" y se estropean si cambias esto o hud_distance.
+hud_scale = 1.0
+# Sentido del eje Y de recorte: auto (lo detecta el viewport) | 0 | 1. Si al mirar arriba la imagen va al reves, cambialo.
+flip_y = auto
+# look = shader: 0 = el HUD (marcadores, puntuacion) se queda fijo con la camara del juego al girar la cabeza
+#                 1 = el HUD sigue a la cabeza (siempre delante). Ctrl+Shift+Insert lo cambia en el juego.
+hud_follow = 0
+# look = shader: giro maximo de la cabeza que se dibuja (grados). Mas alla el juego no tiene graficos
+# (se verian rotos): la imagen deja de girar y se ve su borde. 0 = sin limite. Ctrl+Shift+Supr: sin limite -> 30 -> 45 -> 60 -> 90 -> sin limite
+look_limit = 0
+# look = shader: se dibuja un poco mas que el campo de vision del visor (bordes al girar rapido)
+overscan = 1.05
+# look = shader: lo que queda al lado/detras de la camara original no desaparece al girar la cabeza
+depth_clamp = 1
+
+# ---------------------------------------------------------------- resolucion y escritorio
+# Resolucion a la que se dibuja cada ojo en juegos Vulkan NATIVOS (Burnout...): auto = segun el visor
+# (85% de la recomendada; en modo pantalla 1920x1080) | off = la de la ventana | 1600x1760 ...
+# Los juegos de Proton (DXVK/VKD3D) usan la resolucion que elijas en el juego: pon 1920x1080 o menos,
+# o 4:3 / 5:4 (1600x1200, 1280x1024) para llenar mas el visor. Cada ojo se dibuja: 4K es demasiado.
+render_size = auto
+# Mostrar tambien el juego en la ventana del escritorio. 0 recomendado: con el monitor apagado o tapado
+# algunos drivers (NVIDIA) bloquean la presentacion y el juego da tirones.
+mirror = 0
+
+# ---------------------------------------------------------------- modo pantalla (display = screen)
+screen_distance = 3.0
+screen_width = 5.5
+# separacion / convergencia como en stereo3d (Ctrl+Shift+F3/F4 y F5/F6 en modo pantalla)
+separation = 0.015
+convergence = 1.5
+hud_depth = 0
+
+# ---------------------------------------------------------------- general
+swap_eyes = 0
+stereo = 1
+# replay    = cada fotograma se dibuja dos veces (un ojo cada vez): los dos ojos del mismo instante (recomendado)
+# alternate = un fotograma para cada ojo (juegos que leen de la GPU a mitad de fotograma: EDF, emuladores)
+mode = replay
+auto_switch = 1
+# Limite de FPS del juego: auto = frecuencia del visor (72/90/120 Hz) | off | numero
+fps_limit = auto
+# Ventana del juego en el escritorio (espejo del ojo derecho): mailbox no frena nunca al visor
+present_mode = mailbox
+hide_extensions = 1
+# 0 errores, 1 informacion, 2 detalle
+log_level = 1

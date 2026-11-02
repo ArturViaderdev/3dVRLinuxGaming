@@ -1,0 +1,47 @@
+#!/bin/sh
+# vrlinux launcher: starts vrlinux-host (OpenXR, outside the Steam container) and runs the game
+# with the vrlinux Vulkan layer.
+#
+# Steam (game Properties > General > Launch options):
+#     /home/USER/.local/bin/vrlinux-run %command%
+# Use SteamVR instead of WiVRn:
+#     VRLINUX_RUNTIME=steamvr /home/USER/.local/bin/vrlinux-run %command%
+# Terminal (native game):
+#     vrlinux-run ./game
+HOST="$(dirname "$(readlink -f "$0")")/vrlinux-host"
+[ -x "$HOST" ] || HOST="$HOME/.local/bin/vrlinux-host"
+
+pick_json() {  # first existing file
+  for f in "$@"; do [ -f "$f" ] && { echo "$f"; return 0; }; done
+  return 1
+}
+case "${VRLINUX_RUNTIME:-}" in
+  steamvr|SteamVR)
+    J=$(pick_json "$HOME/.steam/steam/steamapps/common/SteamVR/steamxr_linux64.json" \
+                  "$HOME/.local/share/Steam/steamapps/common/SteamVR/steamxr_linux64.json" \
+                  "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/SteamVR/steamxr_linux64.json") \
+      && export XR_RUNTIME_JSON="$J" || echo "vrlinux-run: SteamVR not found, using the active OpenXR runtime" >&2 ;;
+  wivrn|WiVRn)
+    J=$(pick_json /usr/share/openxr/1/openxr_wivrn.json /usr/local/share/openxr/1/openxr_wivrn.json \
+                  /var/lib/flatpak/app/io.github.wivrn.wivrn/current/active/files/share/openxr/1/openxr_wivrn.json \
+                  "$HOME/.local/share/flatpak/app/io.github.wivrn.wivrn/current/active/files/share/openxr/1/openxr_wivrn.json") \
+      && export XR_RUNTIME_JSON="$J" || echo "vrlinux-run: WiVRn not found, using the active OpenXR runtime" >&2 ;;
+  "") ;;
+  *) [ -f "$VRLINUX_RUNTIME" ] && export XR_RUNTIME_JSON="$VRLINUX_RUNTIME" ;;
+esac
+
+STARTED=""
+if [ -x "$HOST" ] && ! "$HOST" --ping; then
+  env -u ENABLE_VRLINUX "$HOST" &
+  STARTED=$!
+fi
+
+export ENABLE_VRLINUX=1
+# DXVK's own vsync / frame limiter off: vrlinux paces the game to the headset
+: "${DXVK_CONFIG:=dxgi.syncInterval=0;d3d9.presentInterval=0;dxgi.maxFrameRate=0;d3d9.maxFrameRate=0}"
+export DXVK_CONFIG
+
+"$@"
+RC=$?
+[ -n "$STARTED" ] && kill "$STARTED" 2>/dev/null
+exit $RC
