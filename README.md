@@ -103,7 +103,7 @@ The game camera is re-projected in the shaders to your head orientation, on top 
 
 - `~/.config/vrlinux/default.conf`: all games (every option is explained in `default.conf.example`).
 - `~/.config/vrlinux/<Game.exe>.conf`: per-game profile (Ctrl+Shift+F9). Edits are reloaded live.
-- Built-in presets: Forza Horizon 3 / Azimuth (`hide_extensions = 0`, `mode = alternate`), EDF5 and EDF6 (`mode = alternate`). A saved profile wins.
+- Built-in presets: Unreal Engine games (`<Name>-Win64-Shipping.exe`) start with `world_scale = 100`; Forza Horizon 3 / Azimuth (`hide_extensions = 0`). A saved profile wins (a profile saved with `world_scale = 1` in an Unreal game makes it look flat: set 100).
 
 Main options:
 
@@ -116,7 +116,8 @@ Main options:
 | `hud_follow` | `0` | HUD follows your head |
 | `positional` | `1` | head movement moves the camera |
 | `fov` / `fov_axis` | `90` / `h` | the game's FOV (horizontal or vertical) |
-| `world_scale` | `1.0` | immersive 3D strength (game units per metre) |
+| `world_scale` | `1.0` (Unreal: `100`) | immersive 3D strength (game units per metre) |
+| `offscreen_mono` | `1` | shadow maps and other square / 2:1 off-screen passes are drawn without the eye offset |
 | `separation` / `convergence` | `0.015` / `1.5` | screen mode 3D |
 | `screen_distance` / `screen_width` | `3.0` / `5.5` | screen size and distance (m) |
 | `render_size` | `auto` | resolution of native Vulkan games (`auto`, `off`, `1832x2016`…) |
@@ -138,7 +139,11 @@ Environment variables (highest priority): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`
 | "Unsupported graphics card" | try `VRLINUX_HIDE_EXT=0` (Azimuth already has it in its preset). |
 | Broken graphics when turning the head | raise the in-game FOV or set a limit with Ctrl+Shift+Delete; or turn head rotation off (Ctrl+Shift+F11). |
 | World drifts when turning the head | `fov` does not match the game's FOV: adjust with Ctrl+Shift+F1/F2. |
-| Black or 2D frames now and then | the game reads GPU results mid-frame: `mode = alternate`. |
+| Black or 2D frames now and then | the log line `replay 3D x (relaxed y) / 2D z` counts them; if `2D` keeps growing try `mode = alternate` (half the fps per eye). |
+| Shadows in the wrong place / different in each eye | keep `offscreen_mono = 1`; the log line `off-screen passes` shows how many were found. |
+| Unreal Engine game looks flat / eyes mixed (Air Twister...) | first check `world_scale` is 100 (log line `scale`). Then: |
+| Unreal Engine TAA | TAA mixes both eyes. In `Engine.ini` (`.../Saved/Config/Windows/` inside the Proton prefix) add `[SystemSettings]` `r.AntiAliasingMethod=1` (FXAA) and `r.DefaultFeature.AntiAliasing=1`. |
+| Game closes or hangs at the logo | send `~/.config/vrlinux/logs/<Game.exe>.log`; `DISABLE_VRLINUX=1` runs it without the layer to compare. |
 | Double image | TAA / DLSS / FSR2 / motion blur in the game: disable. |
 | "different GPU/driver" | the game and the VR runtime must use the same GPU; Flatpak Steam on AMD/Intel ships its own Mesa: use native Steam. |
 
@@ -240,7 +245,7 @@ La cámara del juego se reproyecta en los shaders a la orientación de tu cabeza
 
 - `~/.config/vrlinux/default.conf`: todos los juegos (cada opción está explicada en `default.conf.example`).
 - `~/.config/vrlinux/<Juego.exe>.conf`: perfil de cada juego (Ctrl+Shift+F9). Se recarga solo si lo editas.
-- Perfiles incluidos: Forza Horizon 3 / Azimuth (`hide_extensions = 0`, `mode = alternate`), EDF5 y EDF6 (`mode = alternate`). Un perfil guardado tiene prioridad.
+- Perfiles incluidos: los juegos Unreal Engine (`<Nombre>-Win64-Shipping.exe`) arrancan con `world_scale = 100`; Forza Horizon 3 / Azimuth (`hide_extensions = 0`). Un perfil guardado tiene prioridad (un perfil guardado con `world_scale = 1` en un juego Unreal lo deja plano: pon 100).
 
 Opciones principales:
 
@@ -253,7 +258,8 @@ Opciones principales:
 | `hud_follow` | `0` | el HUD sigue a tu cabeza |
 | `positional` | `1` | mover la cabeza mueve la cámara |
 | `fov` / `fov_axis` | `90` / `h` | FOV del juego (horizontal o vertical) |
-| `world_scale` | `1.0` | fuerza del 3D en inmersivo (unidades del juego por metro) |
+| `world_scale` | `1.0` (Unreal: `100`) | fuerza del 3D en inmersivo (unidades del juego por metro) |
+| `offscreen_mono` | `1` | los mapas de sombras y otras pasadas fuera de pantalla (cuadradas / 2:1) se dibujan sin el desplazamiento de cada ojo |
 | `separation` / `convergence` | `0.015` / `1.5` | 3D del modo pantalla |
 | `screen_distance` / `screen_width` | `3.0` / `5.5` | distancia y tamaño de la pantalla (m) |
 | `render_size` | `auto` | resolución de los juegos Vulkan nativos (`auto`, `off`, `1832x2016`…) |
@@ -275,7 +281,11 @@ Variables de entorno (máxima prioridad): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`
 | "Tarjeta gráfica no soportada" | prueba `VRLINUX_HIDE_EXT=0` (Azimuth ya lo lleva en su perfil incluido). |
 | Gráficos rotos al girar la cabeza | sube el FOV del juego o pon un límite con Ctrl+Shift+Supr; o apaga el giro (Ctrl+Shift+F11). |
 | El mundo se desplaza al girar la cabeza | el `fov` no coincide con el del juego: ajústalo con Ctrl+Shift+F1/F2. |
-| Fotogramas negros o en 2D de vez en cuando | el juego lee de la GPU a mitad de fotograma: `mode = alternate`. |
+| Fotogramas negros o en 2D de vez en cuando | la línea `replay 3D x (relaxed y) / 2D z` del registro los cuenta; si `2D` no para de subir prueba `mode = alternate` (la mitad de fps por ojo). |
+| Sombras mal colocadas / distintas en cada ojo | deja `offscreen_mono = 1`; la línea `off-screen passes` del registro dice cuántas se encontraron. |
+| Juego Unreal Engine plano / ojos mezclados (Air Twister...) | primero comprueba que `world_scale` es 100 (línea `scale` del registro). Después: |
+| TAA de Unreal Engine | el TAA mezcla los dos ojos. En `Engine.ini` (`.../Saved/Config/Windows/` dentro del prefijo de Proton) añade `[SystemSettings]` `r.AntiAliasingMethod=1` (FXAA) y `r.DefaultFeature.AntiAliasing=1`. |
+| El juego se cierra o se cuelga en el logo | envía `~/.config/vrlinux/logs/<Juego.exe>.log`; `DISABLE_VRLINUX=1` lo arranca sin la capa para comparar. |
 | Imagen doble | TAA / DLSS / FSR2 / desenfoque de movimiento en el juego: desactívalos. |
 | "different GPU/driver" | el juego y el runtime VR deben usar la misma GPU; Steam Flatpak con AMD/Intel lleva su propio Mesa: usa Steam nativo. |
 

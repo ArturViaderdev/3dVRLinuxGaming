@@ -26,6 +26,7 @@ struct Config {
   float lookLimit = 0.0f;      // shader look: max head rotation drawn (degrees, 0 = no limit); beyond it the image stays put
   int flipY = -1;              // clip-space Y points down: -1 auto (viewport sign), 0 no, 1 yes
   float overscan = 1.05f;      // shader look: render a bit more than the headset FOV (for reprojection)
+  bool offscreenMono = true;   // passes whose shape differs from the game frame (shadow maps) get no eye transform
   bool depthClamp = true;      // shader look: keep geometry beside/behind the game camera inside the depth range
   int renderW = -1, renderH = -1;  // size reported to native Vulkan games (-1 auto, 0 off)
   bool mirror = false;         // show the game on the desktop window too (can stall on some drivers)
@@ -47,6 +48,7 @@ struct Config {
   int mode = 1;                // 1 replay (both eyes every game frame), 0 alternate
   float fpsLimit = 0.0f;       // stereo frames per second. 0 = headset refresh rate, <0 = no limit
   bool autoSwitch = true;
+  bool replayRelaxed = true;   // replay even when the game needs GPU results mid-frame (readbacks, vkd3d)
 };
 
 Config& Cfg();

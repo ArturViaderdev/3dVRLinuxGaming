@@ -107,6 +107,7 @@ static void ApplyKey(const char* key, const char* val) {
   else if (!strcmp(key, "look_limit") && ParseFloat(val, f)) c.lookLimit = std::clamp(f, 0.0f, 180.0f);
   else if (!strcmp(key, "overscan") && ParseFloat(val, f)) c.overscan = std::clamp(f, 1.0f, 1.5f);
   else if (!strcmp(key, "depth_clamp") && ParseBool(val, b)) c.depthClamp = b;
+  else if (!strcmp(key, "offscreen_mono") && ParseBool(val, b)) c.offscreenMono = b;
   else if (!strcmp(key, "mirror") && ParseBool(val, b)) c.mirror = b;
   else if (!strcmp(key, "render_size")) {
     unsigned w = 0, h = 0;
@@ -123,6 +124,7 @@ static void ApplyKey(const char* key, const char* val) {
   else if (!strcmp(key, "stereo") && ParseBool(val, b)) c.stereo = b;
   else if (!strcmp(key, "present_mode")) c.presentMode = ParsePresentMode(val, c.presentMode);
   else if (!strcmp(key, "auto_switch") && ParseBool(val, b)) c.autoSwitch = b;
+  else if (!strcmp(key, "replay_relaxed") && ParseBool(val, b)) c.replayRelaxed = b;
   else if (!strcmp(key, "fps_limit")) {
     if (!strcasecmp(val, "auto")) c.fpsLimit = 0.0f;
     else if (!strcasecmp(val, "off") || !strcasecmp(val, "none")) c.fpsLimit = -1.0f;
@@ -204,12 +206,12 @@ static void LoadEnv() {
       {"VRLINUX_HUD_SCALE", "hud_scale"},     {"VRLINUX_FLIP_Y", "flip_y"},
       {"VRLINUX_RENDER_SIZE", "render_size"}, {"VRLINUX_MIRROR", "mirror"},
       {"VRLINUX_OVERSCAN", "overscan"},       {"VRLINUX_HUD_FOLLOW", "hud_follow"},
-      {"VRLINUX_LOOK_LIMIT", "look_limit"},     {"VRLINUX_DEPTH_CLAMP", "depth_clamp"},
+      {"VRLINUX_LOOK_LIMIT", "look_limit"},     {"VRLINUX_DEPTH_CLAMP", "depth_clamp"}, {"VRLINUX_OFFSCREEN_MONO", "offscreen_mono"},
       {"VRLINUX_SCREEN_WIDTH", "screen_width"}, {"VRLINUX_SCREEN_DISTANCE", "screen_distance"},
       {"VRLINUX_SEP", "separation"},          {"VRLINUX_CONV", "convergence"},
       {"VRLINUX_SWAP", "swap_eyes"},          {"VRLINUX_STEREO", "stereo"},
       {"VRLINUX_PRESENT_MODE", "present_mode"}, {"VRLINUX_AUTO_SWITCH", "auto_switch"},
-      {"VRLINUX_FPS_LIMIT", "fps_limit"},     {"VRLINUX_MODE", "mode"},
+      {"VRLINUX_FPS_LIMIT", "fps_limit"},     {"VRLINUX_MODE", "mode"}, {"VRLINUX_RELAXED", "replay_relaxed"},
       {"VRLINUX_HIDE_EXT", "hide_extensions"}, {"VRLINUX_PATCH", "patch_shaders"},
       {"VRLINUX_LOG_LEVEL", "log_level"},     {"VRLINUX_HOTKEYS", "hotkeys"},
   };
@@ -229,10 +231,17 @@ void LoadConfig() {
   else g_profile = dir + "/" + g_game + ".conf";
   // built-in presets for games known to need something (a saved profile still wins)
   static const struct { const char* game; const char* keys; } kPresets[] = {
-      {"azimuth.exe", "hide_extensions=0;mode=alternate"},   // Forza Horizon 3 (Azimuth): needs GPL, emulated GPU
-      {"EDF6.exe", "mode=alternate"},                        // reads back from the GPU every frame
-      {"EDF5.exe", "mode=alternate"},
+      {"azimuth.exe", "hide_extensions=0"},   // Forza Horizon 3 (Azimuth): needs graphics pipeline library
   };
+  // Unreal Engine games (<Project>-Win64-Shipping.exe) measure the world in centimetres
+  auto endsWith = [](const std::string& a, const char* b) {
+    size_t n = strlen(b);
+    return a.size() >= n && !strcasecmp(a.c_str() + a.size() - n, b);
+  };
+  if (endsWith(g_game, "-Shipping.exe") || endsWith(g_game, "-Shipping")) {
+    ApplyKey("world_scale", "100");
+    g_preset = "world_scale=100 (Unreal Engine)";
+  }
   for (auto& pr : kPresets)
     if (!strcasecmp(g_game.c_str(), pr.game)) {
       std::string k = pr.keys;
@@ -300,8 +309,8 @@ void SaveConfig() {
   fprintf(f, "positional = %d\npositional_limit = %.3f\nfov = %.2f\nfov_axis = %s\nworld_scale = %.5f\n",
           c.positional, c.posLimit, c.fov, c.fovAxis ? "v" : "h", c.worldScale);
   fprintf(f, "hud_follow = %d\nlook_limit = %.1f\n", c.hudFollow, c.lookLimit);
-  fprintf(f, "flip_y = %s\noverscan = %.3f\ndepth_clamp = %d\nmirror = %d\n",
-          c.flipY < 0 ? "auto" : c.flipY ? "1" : "0", c.overscan, c.depthClamp, c.mirror);
+  fprintf(f, "flip_y = %s\noverscan = %.3f\ndepth_clamp = %d\noffscreen_mono = %d\nmirror = %d\n",
+          c.flipY < 0 ? "auto" : c.flipY ? "1" : "0", c.overscan, c.depthClamp, c.offscreenMono, c.mirror);
   if (c.renderW < 0) fprintf(f, "render_size = auto\n");
   else if (c.renderW == 0) fprintf(f, "render_size = off\n");
   else fprintf(f, "render_size = %dx%d\n", c.renderW, c.renderH);
@@ -309,6 +318,7 @@ void SaveConfig() {
           c.hudDistance, c.hudScale, c.screenDist, c.screenWidth);
   fprintf(f, "separation = %.5f\nconvergence = %.5f\nhud_depth = %.4f\nswap_eyes = %d\nstereo = %d\n", c.separation,
           c.convergence, c.hudDepth, c.swapEyes, c.stereo);
+  fprintf(f, "replay_relaxed = %d\n", c.replayRelaxed);
   fprintf(f, "mode = %s\nauto_switch = %d\npresent_mode = %s\n", c.mode ? "replay" : "alternate", c.autoSwitch,
           PresentModeName(c.presentMode));
   if (c.fpsLimit == 0) fprintf(f, "fps_limit = auto\n");

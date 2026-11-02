@@ -1,5 +1,5 @@
 # vrlinux - configuracion por defecto (~/.config/vrlinux/default.conf)
-# vrlinux-config-version 6
+# vrlinux-config-version 7
 # Cada juego guarda su propio perfil en ~/.config/vrlinux/<Juego.exe>.conf con Ctrl+Shift+F9.
 # Los perfiles se recargan solos si los editas con el juego abierto.
 
@@ -46,7 +46,8 @@ positional_limit = 0.5
 fov = 90
 # h = el FOV del juego es horizontal (la mayoria) | v = vertical (juegos Unity y algunos otros)
 fov_axis = h
-# Unidades del juego por metro: 1 casi todos los motores (Unity...), 100 Unreal Engine (centimetros).
+# Unidades del juego por metro: 1 casi todos los motores (Unity...), 100 Unreal Engine (centimetros;
+# los juegos Unreal <Nombre>-Win64-Shipping.exe ya arrancan con 100).
 # Controla la fuerza del 3D: si todo parece de juguete (pequeno), bajalo; si gigante, subelo (Ctrl+Shift+F3/F4).
 world_scale = 1.0
 # Distancia (m) a la que se ve el HUD 2D (textos, mira). 0 = infinito (sin cambios). Ctrl+Shift+RePag/AvPag
@@ -66,6 +67,9 @@ look_limit = 0
 overscan = 1.05
 # look = shader: lo que queda al lado/detras de la camara original no desaparece al girar la cabeza
 depth_clamp = 1
+# 1 = las pasadas que no son la camara del juego (mapas de sombras, reflejos: texturas cuadradas o 2:1)
+#     se dibujan sin el desplazamiento de cada ojo. Si las sombras se ven mal en un juego, prueba 0.
+offscreen_mono = 1
 
 # ---------------------------------------------------------------- resolucion y escritorio
 # Resolucion a la que se dibuja cada ojo en juegos Vulkan NATIVOS (Burnout...): auto = segun el visor
@@ -89,7 +93,7 @@ hud_depth = 0
 swap_eyes = 0
 stereo = 1
 # replay    = cada fotograma se dibuja dos veces (un ojo cada vez): los dos ojos del mismo instante (recomendado)
-# alternate = un fotograma para cada ojo (juegos que leen de la GPU a mitad de fotograma: EDF, emuladores)
+# alternate = un fotograma para cada ojo (la mitad de fps por ojo; solo si replay da imagenes en 2D)
 mode = replay
 auto_switch = 1
 # Limite de FPS del juego: auto = frecuencia del visor (72/90/120 Hz) | off | numero

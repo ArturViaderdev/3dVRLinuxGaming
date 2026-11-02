@@ -18,12 +18,16 @@
 
 #include <algorithm>
 #include <dirent.h>
+#include <dlfcn.h>
+#include <signal.h>
+#include <pthread.h>
 #include <unistd.h>
 #include <cstdio>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <functional>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -75,8 +79,12 @@ namespace {
   X(AllocateCommandBuffers) X(FreeCommandBuffers) X(BeginCommandBuffer) X(EndCommandBuffer) \
   X(ResetCommandBuffer) X(CmdPipelineBarrier) X(CmdCopyImage) X(CmdBlitImage)               \
   X(CmdUpdateBuffer) X(CmdClearColorImage) X(CmdCopyImageToBuffer) X(CreateFence) X(DestroyFence) X(WaitForFences)  \
-  X(ResetFences) X(CreateSemaphore) X(DestroySemaphore) X(WaitSemaphores) X(WaitSemaphoresKHR) X(GetMemoryFdKHR) X(GetFenceStatus) \
-  X(CmdSetViewport) X(CmdSetViewportWithCount) X(CmdSetViewportWithCountEXT)
+  X(ResetFences) X(CreateSemaphore) X(DestroySemaphore) X(WaitSemaphores) X(WaitSemaphoresKHR) X(GetMemoryFdKHR) X(GetFenceStatus) X(ResetCommandPool) X(DestroyImageView) X(DestroyBufferView) \
+  X(DestroySampler) X(DestroyPipeline) X(DestroyFramebuffer) X(DestroyQueryPool) X(DestroyDescriptorPool) \
+  X(ResetDescriptorPool) X(FreeDescriptorSets) X(DestroyEvent) \
+  X(CmdSetViewport) X(CmdSetViewportWithCount) X(CmdSetViewportWithCountEXT) \
+  X(CmdBeginRenderPass) X(CmdBeginRenderPass2) X(CmdBeginRenderPass2KHR) X(CmdBeginRendering) \
+  X(CmdBeginRenderingKHR) X(CmdCopyBuffer) X(GetSemaphoreCounterValue) X(GetSemaphoreCounterValueKHR)
 
 struct InstDispatch {
 #define DECL(n) PFN_vk##n n = nullptr;
@@ -235,6 +243,34 @@ struct DeviceData {
   std::atomic<uint64_t> presentCount{0};
   std::atomic<int> swapCount{0};
   std::atomic<uint64_t> lastAbortPresent{0};
+  // ---- relaxed replay: the app may get a frame's signals before the right eye is replayed
+  // (games that read GPU results mid-frame, vkd3d's present thread). Command buffers and
+  // resources of that frame must then survive until the replay is done.
+  std::mutex cbLock;                          // order: recLock -> cbLock
+  std::condition_variable cbCv;
+  std::unordered_map<VkCommandBuffer, VkCommandPool> cbPool;
+  std::unordered_map<VkCommandPool, std::unordered_set<VkCommandBuffer>> poolCbs;
+  std::unordered_set<VkCommandBuffer> recSet;  // recCbs of the frame being recorded
+  std::unordered_map<VkCommandBuffer, uint64_t> cbSerial;  // frame serial whose replay uses the cb
+  uint64_t frameSerial = 1;                   // frame being recorded
+  uint64_t submittedSerial = 0;               // last frame whose replay was submitted (or dropped)
+  uint64_t relaxedSerial = 0;                 // last frame whose signals were released early
+  bool dropFrame = false;                     // a recorded cb was reset before present: no replay
+  VkFence serialFence[8] = {};
+  uint64_t serialOf[8] = {};
+  std::atomic<uint32_t> relaxedFrames{0};
+  struct Deferred { uint64_t serial; std::function<void()> fn; };
+  std::vector<Deferred> deferred;             // destroys waiting for a relaxed replay
+  // ---- off-screen passes (shadow maps, reflection cubes...): drawn without the eye transform.
+  // paramBuf: [0] params the shaders read, [256] this eye's params, [512] identity
+  std::atomic<uint32_t> gameW{0}, gameH{0};   // size the game renders its frame at
+  std::mutex passLock;
+  std::unordered_set<VkCommandBuffer> monoCbs;  // command buffers left with identity params active
+  std::atomic<uint32_t> monoPasses{0};
+  // ---- games polling (timeout 0 / vkGetFenceStatus) for a signal the replay holds
+  std::mutex pollLock;
+  uint64_t pollPresent = UINT64_MAX;
+  Clock::time_point pollStart{};
 };
 
 std::mutex g_lock;
@@ -334,7 +370,19 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_CreateInstance(const VkInstanceCreateInfo* c
   chain->u.pLayerInfo = chain->u.pLayerInfo->pNext;
   auto create = (PFN_vkCreateInstance)gipa(VK_NULL_HANDLE, "vkCreateInstance");
   LoadConfig();
+  // our threads (watchdog, publisher) may outlive the instance (games often leak the device at
+  // exit): never let the loader unload this library under them
+  static bool pinned = false;
+  if (!pinned) {
+    pinned = true;
+    Dl_info info;
+    if (dladdr((void*)&hook_CreateInstance, &info) && info.dli_fname) dlopen(info.dli_fname, RTLD_NOW | RTLD_NODELETE);
+  }
   VkResult r = create(ci, alloc, pInstance);
+  const VkApplicationInfo* ai = ci->pApplicationInfo;
+  Log(r == VK_SUCCESS ? 1 : 0, "vkCreateInstance%s: app '%s' engine '%s' api %u.%u", r == VK_SUCCESS ? "" : " FAILED",
+      ai && ai->pApplicationName ? ai->pApplicationName : "", ai && ai->pEngineName ? ai->pEngineName : "",
+      ai ? VK_API_VERSION_MAJOR(ai->apiVersion) : 1, ai ? VK_API_VERSION_MINOR(ai->apiVersion) : 0);
   if (r != VK_SUCCESS) return r;
 
   auto* id = new InstanceData();
@@ -416,8 +464,13 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_EnumerateDeviceExtensionProperties(
   if (r != VK_SUCCESS && r != VK_INCOMPLETE) return r;
   all.resize(n);
   std::vector<VkExtensionProperties> kept;
-  for (auto& e : all)
+  std::string hidden;
+  for (auto& e : all) {
     if (!IsHidden(e.extensionName)) kept.push_back(e);
+    else hidden += std::string(" ") + e.extensionName;
+  }
+  static std::atomic<bool> logged{false};
+  if (!hidden.empty() && !logged.exchange(true)) Log(1, "hiding from the game:%s", hidden.c_str());
   if (!props) {
     *count = uint32_t(kept.size());
     return VK_SUCCESS;
@@ -569,8 +622,8 @@ EyeParams IdentityParams() {
 
 bool CreateParamBuffer(DeviceData* dd) {
   VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bci.size = 256;
-  bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+  bci.size = 1024;
+  bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
   bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
   if (dd->d.CreateBuffer(dd->device, &bci, nullptr, &dd->paramBuf) != VK_SUCCESS) return false;
@@ -590,7 +643,7 @@ bool CreateParamBuffer(DeviceData* dd) {
   void* map = nullptr;
   if (dd->d.MapMemory(dd->device, dd->paramMem, 0, VK_WHOLE_SIZE, 0, &map) == VK_SUCCESS) {
     EyeParams id = IdentityParams();
-    memcpy(map, id.m, sizeof(id.m));
+    for (int o : {0, 256, 512}) memcpy((char*)map + o, id.m, sizeof(id.m));
     dd->d.UnmapMemory(dd->device, dd->paramMem);
   }
   VkBufferDeviceAddressInfo bai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
@@ -604,6 +657,8 @@ bool CreateParamBuffer(DeviceData* dd) {
 }
 
 void PublisherMain(DeviceData* dd);
+void StopThreadsAtExit();
+void RunDeferred(DeviceData* dd, bool all);
 void DestroyExport(DeviceData* dd, VrExport* ex);
 
 VKAPI_ATTR VkResult VKAPI_CALL hook_CreateDevice(VkPhysicalDevice phys, const VkDeviceCreateInfo* pci,
@@ -716,7 +771,13 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_CreateDevice(VkPhysicalDevice phys, const Vk
   }
 
   VkResult r = create(phys, &ci, alloc, pDevice);
-  if (r != VK_SUCCESS) return r;
+  if (r != VK_SUCCESS) {
+    std::string e;
+    for (uint32_t i = 0; i < ci.enabledExtensionCount; ++i) e += std::string(" ") + ci.ppEnabledExtensionNames[i];
+    Log(0, "vkCreateDevice FAILED (VkResult %d) on '%s'. stereo=%d export=%d extensions:%s", (int)r,
+        props.deviceName, wantStereo, canExport, e.c_str());
+    return r;
+  }
 
   auto* dd = new DeviceData();
   dd->device = *pDevice;
@@ -767,12 +828,46 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_CreateDevice(VkPhysicalDevice phys, const Vk
       dd->replay ? "replay (both eyes every frame)" : "alternate (L/R frames)", (unsigned long long)dd->paramAddr);
 
   if (!Cfg().passthrough) {
+    // our helper threads must never receive process signals: under Wine they would run Wine's
+    // handlers on a thread Wine doesn't know (crash at exit: "nested exception on signal stack")
+    static bool atexitSet = false;
+    if (!atexitSet) {
+      atexitSet = true;
+      atexit(StopThreadsAtExit);
+    }
+    sigset_t all, old;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &old);
     dd->watchdog = std::thread(WatchdogMain, dd);
     if (dd->canExport) dd->publisher = std::thread(PublisherMain, dd);
+    pthread_sigmask(SIG_SETMASK, &old, nullptr);
   }
   std::lock_guard<std::mutex> l(g_lock);
   g_devByKey[Key(*pDevice)] = dd;
   return VK_SUCCESS;
+}
+
+// Process exit with the device still alive (most games never destroy it): stop our threads before
+// the C++ runtime tears down the globals they use. Registered after our static objects, so it runs
+// before their destructors.
+void StopThreadsAtExit() {
+  std::vector<DeviceData*> devs;
+  {
+    std::lock_guard<std::mutex> l(g_lock);
+    for (auto& kv : g_devByKey) devs.push_back(kv.second);
+  }
+  for (DeviceData* dd : devs) {
+    dd->stopWatchdog = true;
+    {
+      std::lock_guard<std::mutex> l(dd->pubLock);
+      dd->pubStop = true;
+    }
+    dd->pubCv.notify_all();
+  }
+  for (DeviceData* dd : devs) {
+    if (dd->watchdog.joinable()) dd->watchdog.join();
+    if (dd->publisher.joinable()) dd->publisher.join();
+  }
 }
 
 VKAPI_ATTR void VKAPI_CALL hook_DestroyDevice(VkDevice device, const VkAllocationCallbacks* a) {
@@ -788,6 +883,10 @@ VKAPI_ATTR void VKAPI_CALL hook_DestroyDevice(VkDevice device, const VkAllocatio
   }
   dd->pubCv.notify_all();
   if (dd->publisher.joinable()) dd->publisher.join();
+  dd->d.DeviceWaitIdle(device);
+  RunDeferred(dd, true);
+  for (VkFence f : dd->serialFence)
+    if (f) dd->d.DestroyFence(device, f, nullptr);
   {
     std::lock_guard<std::mutex> l(dd->shaderLock);
     for (auto& m : dd->modules)
@@ -832,8 +931,14 @@ bool IsTimeline(DeviceData* dd, VkSemaphore sem) {
 }
 
 // caller holds dd->recLock and the queue lock of q
+bool Tracing() { static int t = getenv("VRLINUX_TRACE") ? 1 : 0; return t; }
 void ReleaseHeldLocked(DeviceData* dd, VkQueue q) {
   if (dd->heldTimeline.empty() && dd->heldFences.empty()) return;
+  if (getenv("VRLINUX_TRACE")) {
+    std::string o = "release held:";
+    for (auto& kv : dd->heldTimeline) o += " " + std::to_string((uintptr_t)kv.first % 100000) + "=" + std::to_string(kv.second);
+    Log(0, "%s fences %zu", o.c_str(), dd->heldFences.size());
+  }
   std::vector<VkSemaphore> sems;
   std::vector<uint64_t> vals;
   for (auto& kv : dd->heldTimeline) { sems.push_back(kv.first); vals.push_back(kv.second); }
@@ -864,10 +969,81 @@ void AbortReplayLocked(DeviceData* dd, const char* why) {
     Log(2, "replay skipped this frame: %s", why);
   }
   dd->recCbs.clear();
+  {
+    std::lock_guard<std::mutex> l(dd->cbLock);
+    dd->recSet.clear();
+  }
+  dd->cbCv.notify_all();
   if (dd->gfxQueue) {
     std::lock_guard<std::mutex> l(GetQueueInfo(dd, dd->gfxQueue)->m);
     ReleaseHeldLocked(dd, dd->gfxQueue);
   }
+}
+
+// Relaxed: the app needs a signal of this frame now. Release the held signals but keep
+// recording; the frame is still replayed at present. caller holds dd->recLock.
+void RelaxReplayLocked(DeviceData* dd, const char* why) {
+  if (!Cfg().replayRelaxed || dd->recMono) {
+    AbortReplayLocked(dd, why);
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> l(dd->cbLock);
+    if (dd->relaxedSerial != dd->frameSerial) {
+      dd->relaxedSerial = dd->frameSerial;
+      ++dd->relaxedFrames;
+      dd->lastAbortPresent = dd->presentCount.load();
+      Log(2, "relaxed replay this frame: %s", why);
+    }
+  }
+  if (dd->gfxQueue) {
+    std::lock_guard<std::mutex> l(GetQueueInfo(dd, dd->gfxQueue)->m);
+    ReleaseHeldLocked(dd, dd->gfxQueue);
+  }
+}
+
+// The app is about to reset / free command buffers or destroy objects. If they belong to a
+// frame whose replay is not done yet, wait for it (the replay must not use freed objects).
+// 'cbs' may be empty (destroy of other objects: only waits when the frame was relaxed).
+void WaitReplayDone(DeviceData* dd, const VkCommandBuffer* cbs, uint32_t n, bool anyObject) {
+  if (!dd->replay) return;
+  std::unique_lock<std::mutex> l(dd->cbLock);
+  uint64_t need = 0;
+  for (uint32_t i = 0; i < n; ++i) {
+    VkCommandBuffer cb = cbs[i];
+    if (dd->recSet.count(cb)) {  // recorded this frame, not presented yet: wait for the present
+      if (!dd->cbCv.wait_for(l, std::chrono::milliseconds(100), [&]() { return !dd->recSet.count(cb); })) {
+        dd->recSet.erase(cb);  // the present does not come: give up the replay of this frame
+        dd->dropFrame = true;
+        Log(2, "replay dropped: command buffer reused before present");
+      }
+    }
+    auto it = dd->cbSerial.find(cb);
+    if (it != dd->cbSerial.end()) {
+      need = std::max(need, it->second);
+      dd->cbSerial.erase(it);
+    }
+  }
+  if (anyObject && dd->relaxedSerial) {  // descriptor pool reset while a relaxed frame is pending
+    uint64_t want = dd->relaxedSerial;
+    if (want >= dd->frameSerial) {
+      if (!dd->cbCv.wait_for(l, std::chrono::milliseconds(100), [&]() { return dd->submittedSerial >= want; })) {
+        dd->dropFrame = true;
+        Log(2, "replay dropped: descriptors reset before present");
+      } else {
+        need = std::max(need, want);
+      }
+    } else {
+      need = std::max(need, want);
+    }
+  }
+  if (!need) return;
+  if (dd->submittedSerial < need)
+    dd->cbCv.wait_for(l, std::chrono::milliseconds(250), [&]() { return dd->submittedSerial >= need; });
+  int k = int(need % 8);
+  VkFence f = dd->serialOf[k] == need ? dd->serialFence[k] : VK_NULL_HANDLE;
+  l.unlock();
+  if (f) dd->d.WaitForFences(dd->device, 1, &f, VK_TRUE, 1000000000ull);
 }
 
 bool HeldLocked(DeviceData* dd, VkSemaphore sem, uint64_t value) {
@@ -900,17 +1076,29 @@ bool RecordingQueue(DeviceData* dd, VkQueue q) {
 
 VKAPI_ATTR VkResult VKAPI_CALL hook_QueueSubmit(VkQueue q, uint32_t n, const VkSubmitInfo* s, VkFence f) {
   DeviceData* dd = Dev(q);
+  if (Tracing()) Log(0, "submit1 q=%lu n=%u fence=%d", (unsigned long)((uintptr_t)q % 100000), n, f != VK_NULL_HANDLE);
   if (!dd->replay) {
     std::lock_guard<std::mutex> l(GetQueueInfo(dd, q)->m);
     return dd->d.QueueSubmit(q, n, s, f);
   }
   std::unique_lock<std::mutex> rl(dd->recLock);
-  if (WaitsOnHeldLocked(dd, n, s)) AbortReplayLocked(dd, "submit waits on a held signal");
+  if (WaitsOnHeldLocked(dd, n, s)) RelaxReplayLocked(dd, "submit waits on a held signal");
   if (!RecordingQueue(dd, q) || dd->recMono) {
     rl.unlock();
     std::lock_guard<std::mutex> l(GetQueueInfo(dd, q)->m);
     return dd->d.QueueSubmit(q, n, s, f);
   }
+  {
+    std::lock_guard<std::mutex> cl(dd->cbLock);
+    for (uint32_t i = 0; i < n; ++i)
+      for (uint32_t c = 0; c < s[i].commandBufferCount; ++c) dd->recSet.insert(s[i].pCommandBuffers[c]);
+  }
+  // semaphores this same submission waits on (a later batch waiting for an earlier one):
+  // their signals can never be held, the GPU would wait forever
+  std::vector<VkSemaphore> waited;
+  for (uint32_t i = 0; i < n; ++i)
+    waited.insert(waited.end(), s[i].pWaitSemaphores, s[i].pWaitSemaphores + s[i].waitSemaphoreCount);
+  auto isWaited = [&](VkSemaphore x) { return std::find(waited.begin(), waited.end(), x) != waited.end(); };
   std::vector<VkSubmitInfo> si(s, s + n);
   std::vector<VkTimelineSemaphoreSubmitInfo> tls(n);
   std::vector<std::vector<VkSemaphore>> sigs(n);
@@ -925,7 +1113,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_QueueSubmit(VkQueue q, uint32_t n, const VkS
       VkSemaphore sem = s[i].pSignalSemaphores[k];
       uint64_t v = (tl && tl->pSignalSemaphoreValues && k < tl->signalSemaphoreValueCount)
                        ? tl->pSignalSemaphoreValues[k] : 0;
-      if (IsTimeline(dd, sem)) {
+      if (IsTimeline(dd, sem) && !isWaited(sem)) {
         uint64_t& h = dd->heldTimeline[sem];
         h = std::max(h, v);
         changed = true;
@@ -951,19 +1139,43 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_QueueSubmit(VkQueue q, uint32_t n, const VkS
   return dd->d.QueueSubmit(q, n, si.data(), VK_NULL_HANDLE);
 }
 
+void TraceSubmit2(DeviceData* dd, VkQueue q, uint32_t n, const VkSubmitInfo2* s, VkFence f) {
+  std::string o = "submit2 q=" + std::to_string((uintptr_t)q % 100000) + (q == dd->gfxQueue ? "(gfx)" : "");
+  for (uint32_t i = 0; i < n; ++i) {
+    o += " [cbs " + std::to_string(s[i].commandBufferInfoCount);
+    for (uint32_t w = 0; w < s[i].waitSemaphoreInfoCount; ++w)
+      o += " W" + std::to_string((uintptr_t)s[i].pWaitSemaphoreInfos[w].semaphore % 100000) + "=" + std::to_string(s[i].pWaitSemaphoreInfos[w].value);
+    for (uint32_t w = 0; w < s[i].signalSemaphoreInfoCount; ++w)
+      o += " S" + std::to_string((uintptr_t)s[i].pSignalSemaphoreInfos[w].semaphore % 100000) + "=" + std::to_string(s[i].pSignalSemaphoreInfos[w].value);
+    o += "]";
+  }
+  if (f) o += " fence";
+  Log(0, "%s", o.c_str());
+}
+
 VkResult Submit2Common(DeviceData* dd, VkQueue q, uint32_t n, const VkSubmitInfo2* s, VkFence f,
                        PFN_vkQueueSubmit2 fn) {
+  if (Tracing()) TraceSubmit2(dd, q, n, s, f);
   if (!dd->replay) {
     std::lock_guard<std::mutex> l(GetQueueInfo(dd, q)->m);
     return fn(q, n, s, f);
   }
   std::unique_lock<std::mutex> rl(dd->recLock);
-  if (WaitsOnHeldLocked(dd, n, s)) AbortReplayLocked(dd, "submit waits on a held signal");
+  if (WaitsOnHeldLocked(dd, n, s)) RelaxReplayLocked(dd, "submit waits on a held signal");
   if (!RecordingQueue(dd, q) || dd->recMono) {
     rl.unlock();
     std::lock_guard<std::mutex> l(GetQueueInfo(dd, q)->m);
     return fn(q, n, s, f);
   }
+  {
+    std::lock_guard<std::mutex> cl(dd->cbLock);
+    for (uint32_t i = 0; i < n; ++i)
+      for (uint32_t c = 0; c < s[i].commandBufferInfoCount; ++c) dd->recSet.insert(s[i].pCommandBufferInfos[c].commandBuffer);
+  }
+  std::vector<VkSemaphore> waited;
+  for (uint32_t i = 0; i < n; ++i)
+    for (uint32_t w = 0; w < s[i].waitSemaphoreInfoCount; ++w) waited.push_back(s[i].pWaitSemaphoreInfos[w].semaphore);
+  auto isWaited = [&](VkSemaphore x) { return std::find(waited.begin(), waited.end(), x) != waited.end(); };
   std::vector<VkSubmitInfo2> si(s, s + n);
   std::vector<std::vector<VkSemaphoreSubmitInfo>> sigs(n);
   for (uint32_t i = 0; i < n; ++i) {
@@ -972,7 +1184,7 @@ VkResult Submit2Common(DeviceData* dd, VkQueue q, uint32_t n, const VkSubmitInfo
     bool changed = false;
     for (uint32_t k = 0; k < s[i].signalSemaphoreInfoCount; ++k) {
       const VkSemaphoreSubmitInfo& ss = s[i].pSignalSemaphoreInfos[k];
-      if (IsTimeline(dd, ss.semaphore)) {
+      if (IsTimeline(dd, ss.semaphore) && !isWaited(ss.semaphore)) {
         uint64_t& h = dd->heldTimeline[ss.semaphore];
         h = std::max(h, ss.value);
         changed = true;
@@ -999,6 +1211,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_QueueSubmit2KHR(VkQueue q, uint32_t n, const
 }
 VKAPI_ATTR VkResult VKAPI_CALL hook_QueueWaitIdle(VkQueue q) {
   DeviceData* dd = Dev(q);
+  if (Tracing()) Log(0, "queue wait idle q=%lu", (unsigned long)((uintptr_t)q % 100000));
   if (dd->replay && q == dd->gfxQueue) {
     std::lock_guard<std::mutex> rl(dd->recLock);
     if (!dd->heldFences.empty() || !dd->heldTimeline.empty() || !dd->recCbs.empty())
@@ -1026,16 +1239,42 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_DeviceWaitIdle(VkDevice device) {
 
 // CPU waits: if the app blocks on a held signal and no present arrives, it is waiting for
 // something mid-frame (e.g. a GPU readback) -> release and skip the replay for this frame.
+// The game polls (timeout 0, vkGetFenceStatus, vkGetSemaphoreCounterValue) for a signal the
+// replay holds and no frame is being presented: release the signals (relaxed replay).
+template <class HeldFn>
+void PolledNotReady(DeviceData* dd, HeldFn heldFn) {
+  if (!dd->replay) return;
+  uint64_t pc = dd->presentCount.load();
+  auto now = Clock::now();
+  {
+    std::lock_guard<std::mutex> l(dd->pollLock);
+    if (dd->pollPresent != pc) {
+      dd->pollPresent = pc;
+      dd->pollStart = now;
+      return;
+    }
+    bool recentAbort = pc - dd->lastAbortPresent.load() < 120;
+    if (now - dd->pollStart < std::chrono::milliseconds(recentAbort ? 1 : 40)) return;
+    dd->pollStart = now;
+  }
+  std::lock_guard<std::mutex> rl(dd->recLock);
+  if (heldFn()) RelaxReplayLocked(dd, "app polls a held signal mid-frame");
+}
 template <class WaitFn, class HeldFn>
 VkResult WaitWithReplay(DeviceData* dd, uint64_t timeout, WaitFn waitFn, HeldFn heldFn) {
-  if (!dd->replay || timeout == 0) return waitFn(timeout);
+  if (!dd->replay) return waitFn(timeout);
+  if (timeout == 0) {
+    VkResult r = waitFn(0);
+    if (r == VK_TIMEOUT) PolledNotReady(dd, heldFn);
+    return r;
+  }
   const auto begin = Clock::now();
   auto stallStart = begin;
   uint64_t seenPresent = dd->presentCount.load();
   for (;;) {
     auto now = Clock::now();
     uint64_t total = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now - begin).count());
-    uint64_t slice = 2000000ull;  // 2 ms
+    uint64_t slice = 1000000ull;  // 1 ms
     if (timeout != UINT64_MAX) {
       if (total >= timeout) return VK_TIMEOUT;
       slice = std::min(slice, timeout - total);
@@ -1050,9 +1289,9 @@ VkResult WaitWithReplay(DeviceData* dd, uint64_t timeout, WaitFn waitFn, HeldFn 
     }
     uint64_t stalled = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - stallStart).count());
     bool recentAbort = pc - dd->lastAbortPresent.load() < 120;
-    if (stalled > (recentAbort ? 3000000ull : 40000000ull)) {
+    if (stalled > (recentAbort ? 1000000ull : 40000000ull)) {
       std::lock_guard<std::mutex> rl(dd->recLock);
-      if (heldFn()) AbortReplayLocked(dd, "CPU waits for a held signal mid-frame");
+      if (heldFn()) RelaxReplayLocked(dd, "CPU waits for a held signal mid-frame");
       stallStart = Clock::now();
     }
   }
@@ -1072,6 +1311,12 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_WaitForFences(VkDevice device, uint32_t n, c
 }
 VkResult WaitSemCommon(DeviceData* dd, VkDevice device, const VkSemaphoreWaitInfo* info, uint64_t timeout,
                        PFN_vkWaitSemaphores fn) {
+  if (Tracing() && timeout) {
+    std::string o = "cpu wait";
+    for (uint32_t i = 0; i < info->semaphoreCount; ++i)
+      o += " " + std::to_string((uintptr_t)info->pSemaphores[i] % 100000) + "=" + std::to_string(info->pValues[i]);
+    Log(0, "%s", o.c_str());
+  }
   return WaitWithReplay(
       dd, timeout, [&](uint64_t t) { return fn(device, info, t); },
       [&]() {
@@ -1087,6 +1332,31 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_WaitSemaphores(VkDevice device, const VkSema
 VKAPI_ATTR VkResult VKAPI_CALL hook_WaitSemaphoresKHR(VkDevice device, const VkSemaphoreWaitInfo* info, uint64_t t) {
   DeviceData* dd = Dev(device);
   return WaitSemCommon(dd, device, info, t, dd->d.WaitSemaphoresKHR);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL hook_GetFenceStatus(VkDevice device, VkFence f) {
+  DeviceData* dd = Dev(device);
+  VkResult r = dd->d.GetFenceStatus(device, f);
+  if (r == VK_NOT_READY)
+    PolledNotReady(dd, [&]() { return std::find(dd->heldFences.begin(), dd->heldFences.end(), f) != dd->heldFences.end(); });
+  return r;
+}
+VkResult CounterCommon(DeviceData* dd, VkDevice device, VkSemaphore sem, uint64_t* v, PFN_vkGetSemaphoreCounterValue fn) {
+  VkResult r = fn(device, sem, v);
+  if (r == VK_SUCCESS && dd->replay)
+    PolledNotReady(dd, [&]() {
+      auto it = dd->heldTimeline.find(sem);
+      return it != dd->heldTimeline.end() && it->second > *v;
+    });
+  return r;
+}
+VKAPI_ATTR VkResult VKAPI_CALL hook_GetSemaphoreCounterValue(VkDevice device, VkSemaphore sem, uint64_t* v) {
+  DeviceData* dd = Dev(device);
+  return CounterCommon(dd, device, sem, v, dd->d.GetSemaphoreCounterValue);
+}
+VKAPI_ATTR VkResult VKAPI_CALL hook_GetSemaphoreCounterValueKHR(VkDevice device, VkSemaphore sem, uint64_t* v) {
+  DeviceData* dd = Dev(device);
+  return CounterCommon(dd, device, sem, v, dd->d.GetSemaphoreCounterValueKHR);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL hook_CreateSemaphore(VkDevice device, const VkSemaphoreCreateInfo* ci,
@@ -1113,11 +1383,141 @@ VKAPI_ATTR void VKAPI_CALL hook_DestroySemaphore(VkDevice device, VkSemaphore se
 
 VKAPI_ATTR VkResult VKAPI_CALL hook_BeginCommandBuffer(VkCommandBuffer cb, const VkCommandBufferBeginInfo* bi) {
   DeviceData* dd = Dev(cb);
+  {
+    std::lock_guard<std::mutex> l(dd->passLock);
+    dd->monoCbs.erase(cb);
+  }
   if (!dd->replay) return dd->d.BeginCommandBuffer(cb, bi);
+  WaitReplayDone(dd, &cb, 1, false);
   VkCommandBufferBeginInfo b = *bi;  // the frame is submitted twice
   b.flags &= ~VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   b.flags |= VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
   return dd->d.BeginCommandBuffer(cb, &b);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL hook_ResetCommandBuffer(VkCommandBuffer cb, VkCommandBufferResetFlags f) {
+  DeviceData* dd = Dev(cb);
+  WaitReplayDone(dd, &cb, 1, false);
+  return dd->d.ResetCommandBuffer(cb, f);
+}
+VKAPI_ATTR VkResult VKAPI_CALL hook_AllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo* ai,
+                                                           VkCommandBuffer* cbs) {
+  DeviceData* dd = Dev(device);
+  VkResult r = dd->d.AllocateCommandBuffers(device, ai, cbs);
+  if (r == VK_SUCCESS) {
+    std::lock_guard<std::mutex> l(dd->cbLock);
+    auto& set = dd->poolCbs[ai->commandPool];
+    for (uint32_t i = 0; i < ai->commandBufferCount; ++i) {
+      dd->cbPool[cbs[i]] = ai->commandPool;
+      set.insert(cbs[i]);
+    }
+  }
+  return r;
+}
+std::vector<VkCommandBuffer> PoolCbs(DeviceData* dd, VkCommandPool pool) {
+  std::lock_guard<std::mutex> l(dd->cbLock);
+  auto it = dd->poolCbs.find(pool);
+  if (it == dd->poolCbs.end()) return {};
+  return std::vector<VkCommandBuffer>(it->second.begin(), it->second.end());
+}
+VKAPI_ATTR void VKAPI_CALL hook_FreeCommandBuffers(VkDevice device, VkCommandPool pool, uint32_t n,
+                                                   const VkCommandBuffer* cbs) {
+  DeviceData* dd = Dev(device);
+  WaitReplayDone(dd, cbs, n, false);
+  {
+    std::lock_guard<std::mutex> l(dd->cbLock);
+    auto it = dd->poolCbs.find(pool);
+    for (uint32_t i = 0; i < n; ++i) {
+      dd->cbPool.erase(cbs[i]);
+      if (it != dd->poolCbs.end()) it->second.erase(cbs[i]);
+    }
+  }
+  dd->d.FreeCommandBuffers(device, pool, n, cbs);
+}
+VKAPI_ATTR VkResult VKAPI_CALL hook_ResetCommandPool(VkDevice device, VkCommandPool pool, VkCommandPoolResetFlags f) {
+  DeviceData* dd = Dev(device);
+  std::vector<VkCommandBuffer> v = PoolCbs(dd, pool);
+  WaitReplayDone(dd, v.data(), uint32_t(v.size()), false);
+  return dd->d.ResetCommandPool(device, pool, f);
+}
+VKAPI_ATTR void VKAPI_CALL hook_DestroyCommandPool(VkDevice device, VkCommandPool pool, const VkAllocationCallbacks* a) {
+  DeviceData* dd = Dev(device);
+  std::vector<VkCommandBuffer> v = PoolCbs(dd, pool);
+  WaitReplayDone(dd, v.data(), uint32_t(v.size()), false);
+  {
+    std::lock_guard<std::mutex> l(dd->cbLock);
+    for (VkCommandBuffer cb : v) dd->cbPool.erase(cb);
+    dd->poolCbs.erase(pool);
+  }
+  dd->d.DestroyCommandPool(device, pool, a);
+}
+// Objects destroyed while a relaxed frame still has to be replayed: destroyed later, once the
+// replay that may use them has finished (never blocks the game).
+void RunDeferred(DeviceData* dd, bool all) {
+  std::vector<std::function<void()>> run;
+  {
+    std::lock_guard<std::mutex> l(dd->cbLock);
+    if (dd->deferred.empty()) return;
+    std::vector<DeviceData::Deferred> keep;
+    for (auto& d : dd->deferred) {
+      bool ready = all;
+      if (!ready && d.serial <= dd->submittedSerial) {
+        int k = int(d.serial % 8);
+        ready = dd->serialOf[k] != d.serial || dd->d.GetFenceStatus(dd->device, dd->serialFence[k]) == VK_SUCCESS;
+      }
+      if (ready) run.push_back(std::move(d.fn));
+      else keep.push_back(std::move(d));
+    }
+    dd->deferred.swap(keep);
+  }
+  for (auto& f : run) f();
+}
+bool DeferIfRelaxed(DeviceData* dd, std::function<void()> fn) {
+  if (!dd->replay) return false;
+  {
+    std::lock_guard<std::mutex> l(dd->cbLock);
+    uint64_t r = dd->relaxedSerial;
+    bool pending = false;
+    if (r && r >= dd->frameSerial) pending = true;  // this frame was relaxed and is not replayed yet
+    else if (r && r <= dd->submittedSerial) {
+      int k = int(r % 8);
+      pending = dd->serialOf[k] == r && dd->d.GetFenceStatus(dd->device, dd->serialFence[k]) != VK_SUCCESS;
+    }
+    if (pending) {
+      dd->deferred.push_back({r, std::move(fn)});
+      return true;
+    }
+  }
+  return false;
+}
+#define DESTROY_HOOK(Name, T)                                                                  \
+  VKAPI_ATTR void VKAPI_CALL hook_##Name(VkDevice device, T h, const VkAllocationCallbacks* a) { \
+    DeviceData* dd = Dev(device);                                                              \
+    if (h && DeferIfRelaxed(dd, [dd, device, h, a]() { dd->d.Name(device, h, a); })) return;   \
+    dd->d.Name(device, h, a);                                                                  \
+  }
+DESTROY_HOOK(DestroyBuffer, VkBuffer)
+DESTROY_HOOK(DestroyImage, VkImage)
+DESTROY_HOOK(FreeMemory, VkDeviceMemory)
+DESTROY_HOOK(DestroyImageView, VkImageView)
+DESTROY_HOOK(DestroyBufferView, VkBufferView)
+DESTROY_HOOK(DestroySampler, VkSampler)
+DESTROY_HOOK(DestroyPipeline, VkPipeline)
+DESTROY_HOOK(DestroyFramebuffer, VkFramebuffer)
+DESTROY_HOOK(DestroyQueryPool, VkQueryPool)
+DESTROY_HOOK(DestroyDescriptorPool, VkDescriptorPool)
+DESTROY_HOOK(DestroyEvent, VkEvent)
+#undef DESTROY_HOOK
+VKAPI_ATTR VkResult VKAPI_CALL hook_ResetDescriptorPool(VkDevice device, VkDescriptorPool p, VkDescriptorPoolResetFlags f) {
+  DeviceData* dd = Dev(device);
+  WaitReplayDone(dd, nullptr, 0, true);
+  return dd->d.ResetDescriptorPool(device, p, f);
+}
+VKAPI_ATTR VkResult VKAPI_CALL hook_FreeDescriptorSets(VkDevice device, VkDescriptorPool p, uint32_t n,
+                                                       const VkDescriptorSet* sets) {
+  DeviceData* dd = Dev(device);
+  WaitReplayDone(dd, nullptr, 0, true);
+  return dd->d.FreeDescriptorSets(device, p, n, sets);
 }
 
 // ------------------------------------------------------------------------------------
@@ -1198,6 +1598,97 @@ inline void CountViewports(DeviceData* dd, uint32_t n, const VkViewport* v) {
     else if (v[i].height >= 200.0f) dd->vpPos.fetch_add(1, std::memory_order_relaxed);
   }
 }
+// ---- off-screen render passes ----
+// Shadow maps, reflection / environment cubes and other views that are not the game camera must
+// not get the eye transform (shadows would land in the wrong place, differently in each eye).
+// They are recognised by a render area whose shape differs from the game frame (square shadow
+// atlases...). Before such a pass the identity parameters are copied into the slot the shaders
+// read, and the eye's parameters are copied back before the next camera pass / at the end of the
+// command buffer. Copies are recorded in the game's command buffer, so they also run in the replay.
+bool IsOffscreenArea(DeviceData* dd, VkExtent2D e) {
+  if (!Cfg().offscreenMono || !dd->stereoShaders) return false;
+  if (e.width < 64 || e.height < 64) return false;  // small post-process targets: full-screen passes anyway
+  uint32_t gw = dd->gameW.load(std::memory_order_relaxed), gh = dd->gameH.load(std::memory_order_relaxed);
+  if (e.width == gw && e.height == gh) return false;
+  // shadow maps / atlases and cube faces: 1:1, 2:1 or 4:1 (the game frame may be any size: DXVK
+  // renders at the resolution chosen in the game, not the window's)
+  float r = float(std::max(e.width, e.height)) / float(std::min(e.width, e.height));
+  bool shadowShape = std::fabs(r - 1.0f) < 0.01f || std::fabs(r - 2.0f) < 0.02f || std::fabs(r - 4.0f) < 0.04f;
+  if (!shadowShape) return false;
+  if (gw && gh) {
+    float ga = float(gw) / float(gh), a = float(e.width) / float(e.height);
+    if (std::fabs(a / ga - 1.0f) < 0.04f) return false;
+  }
+  return true;
+}
+void CopyParams(DeviceData* dd, VkCommandBuffer cb, VkDeviceSize from) {
+  VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  mb.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+  mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  dd->d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0,
+                           nullptr, 0, nullptr);
+  VkBufferCopy r{from, 0, sizeof(EyeParams::m)};
+  dd->d.CmdCopyBuffer(cb, dd->paramBuf, dd->paramBuf, 1, &r);
+  mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
+  dd->d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
+                           nullptr, 0, nullptr);
+}
+// called outside any render pass
+void BeforePass(DeviceData* dd, VkCommandBuffer cb, VkExtent2D e) {
+  if (!dd->stereoShaders || !dd->d.CmdCopyBuffer) return;
+  bool off = IsOffscreenArea(dd, e);
+  if (Tracing()) Log(0, "pass %ux%u cb %p off %d", e.width, e.height, (void*)cb, off);
+  bool isMono;
+  {
+    std::lock_guard<std::mutex> l(dd->passLock);
+    isMono = dd->monoCbs.count(cb) != 0;
+    if (off == isMono) return;
+    if (off) dd->monoCbs.insert(cb);
+    else dd->monoCbs.erase(cb);
+  }
+  if (off) ++dd->monoPasses;
+  CopyParams(dd, cb, off ? 512 : 256);
+}
+VKAPI_ATTR void VKAPI_CALL hook_CmdBeginRenderPass(VkCommandBuffer cb, const VkRenderPassBeginInfo* b,
+                                                   VkSubpassContents c) {
+  DeviceData* dd = DevFast(cb);
+  BeforePass(dd, cb, b->renderArea.extent);
+  dd->d.CmdBeginRenderPass(cb, b, c);
+}
+VKAPI_ATTR void VKAPI_CALL hook_CmdBeginRenderPass2(VkCommandBuffer cb, const VkRenderPassBeginInfo* b,
+                                                    const VkSubpassBeginInfo* s) {
+  DeviceData* dd = DevFast(cb);
+  BeforePass(dd, cb, b->renderArea.extent);
+  dd->d.CmdBeginRenderPass2(cb, b, s);
+}
+VKAPI_ATTR void VKAPI_CALL hook_CmdBeginRenderPass2KHR(VkCommandBuffer cb, const VkRenderPassBeginInfo* b,
+                                                       const VkSubpassBeginInfo* s) {
+  DeviceData* dd = DevFast(cb);
+  BeforePass(dd, cb, b->renderArea.extent);
+  dd->d.CmdBeginRenderPass2KHR(cb, b, s);
+}
+VKAPI_ATTR void VKAPI_CALL hook_CmdBeginRendering(VkCommandBuffer cb, const VkRenderingInfo* ri) {
+  DeviceData* dd = DevFast(cb);
+  if (!(ri->flags & VK_RENDERING_RESUMING_BIT)) BeforePass(dd, cb, ri->renderArea.extent);
+  dd->d.CmdBeginRendering(cb, ri);
+}
+VKAPI_ATTR void VKAPI_CALL hook_CmdBeginRenderingKHR(VkCommandBuffer cb, const VkRenderingInfo* ri) {
+  DeviceData* dd = DevFast(cb);
+  if (!(ri->flags & VK_RENDERING_RESUMING_BIT)) BeforePass(dd, cb, ri->renderArea.extent);
+  dd->d.CmdBeginRenderingKHR(cb, ri);
+}
+VKAPI_ATTR VkResult VKAPI_CALL hook_EndCommandBuffer(VkCommandBuffer cb) {
+  DeviceData* dd = DevFast(cb);
+  bool restore;
+  {
+    std::lock_guard<std::mutex> l(dd->passLock);
+    restore = dd->monoCbs.erase(cb) != 0;
+  }
+  if (restore) CopyParams(dd, cb, 256);  // the next command buffer starts with the eye's params
+  return dd->d.EndCommandBuffer(cb);
+}
+
 VKAPI_ATTR void VKAPI_CALL hook_CmdSetViewport(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport* v) {
   DeviceData* dd = DevFast(cb);
   CountViewports(dd, n, v);
@@ -1818,6 +2309,8 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_CreateSwapchainKHR(VkDevice device, const Vk
   sc->handle = *pSwapchain;
   sc->format = ci->imageFormat;
   sc->vext = ci->imageExtent;
+  dd->gameW = ci->imageExtent.width;
+  dd->gameH = ci->imageExtent.height;
   sc->rext = rext;
   uint32_t n = 0;
   dd->d.GetSwapchainImagesKHR(device, sc->handle, &n, nullptr);
@@ -2037,6 +2530,7 @@ void UpdateParams(DeviceData* dd, VkCommandBuffer cb, const EyeParams& p) {
   const VkPipelineStageFlags ALL = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, XFER = VK_PIPELINE_STAGE_TRANSFER_BIT;
   dd->d.CmdPipelineBarrier(cb, ALL, XFER, 0, 0, nullptr, 0, nullptr, 0, nullptr);
   dd->d.CmdUpdateBuffer(cb, dd->paramBuf, 0, sizeof(p.m), p.m);
+  dd->d.CmdUpdateBuffer(cb, dd->paramBuf, 256, sizeof(p.m), p.m);
   VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
   mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
   mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT;
@@ -2055,14 +2549,13 @@ void Stats(DeviceData* dd, Swapchain* sc) {
   ++sc->statFrames;
   double el = std::chrono::duration<double>(now - sc->statStart).count();
   if (el < 5.0) return;
-  uint32_t rf = dd->replayFrames.exchange(0), mf = dd->monoFrames.exchange(0);
+  uint32_t rf = dd->replayFrames.exchange(0), mf = dd->monoFrames.exchange(0), xf = dd->relaxedFrames.exchange(0);
   auto* sh = Link().Shm();
   if (dd->replay && Cfg().autoSwitch && mf > rf && rf + mf >= 30) {
     if (++dd->badReplayWindows >= 2) {
       Log(0, "this game reads back from the GPU every frame (%u of %u frames 2D): switching to alternate mode "
           "(each eye gets half the frames). Use mode = alternate in its profile to skip this.", mf, rf + mf);
-      std::lock_guard<std::mutex> rl(dd->recLock);
-      AbortReplayLocked(dd, "switching to alternate");
+      AbortReplayLocked(dd, "switching to alternate");  // caller (PresentReplay) holds recLock
       dd->replay = false;
       dd->recMono = false;
       dd->frame = 0;
@@ -2070,10 +2563,10 @@ void Stats(DeviceData* dd, Swapchain* sc) {
   } else {
     dd->badReplayWindows = 0;
   }
-  Log(1, "game %.1f fps | to headset %.1f fps [%s] | replay 3D %u / 2D %u | shaders %u | %s fov %.1f scale %.3f sens %.2f",
+  Log(1, "game %.1f fps | to headset %.1f fps [%s] | replay 3D %u (relaxed %u) / 2D %u | shaders %u | off-screen passes %u | %s fov %.1f scale %.3f sens %.2f",
       sc->statFrames / el, sc->statVr / el,
-      !sh ? "host not running" : sh->sessionRunning.load() ? "headset on" : "waiting for headset", rf, mf,
-      dd->patchedCount.load(), Cfg().display ? "screen" : "vr", Cfg().fov, Cfg().worldScale, Cfg().mouseSens);
+      !sh ? "host not running" : sh->sessionRunning.load() ? "headset on" : "waiting for headset", rf, xf, mf,
+      dd->patchedCount.load(), dd->monoPasses.exchange(0), Cfg().display ? "screen" : "vr", Cfg().fov, Cfg().worldScale, Cfg().mouseSens);
   sc->statFrames = 0;
   sc->statVr = 0;
   sc->statStart = now;
@@ -2208,6 +2701,28 @@ VkResult PresentReplay(DeviceData* dd, VkQueue queue, Swapchain* sc, uint32_t id
   const bool stereoWanted = cur.vr && Cfg().stereo;
   bool doReplay = !dd->recMono && !cbs.empty() && stereoWanted && queue == dd->gfxQueue;
   dd->recMono = false;
+  // frame serial: command buffers / objects of this frame must live until its replay is done
+  uint64_t ser;
+  {
+    std::lock_guard<std::mutex> l(dd->cbLock);
+    ser = dd->frameSerial++;
+    if (dd->dropFrame) doReplay = false;
+    dd->dropFrame = false;
+    if (doReplay)
+      for (VkCommandBuffer cb : cbs) dd->cbSerial[cb] = ser;
+    dd->recSet.clear();
+  }
+  struct SerialDone {  // on every return path: the replay of 'ser' is submitted (or not done)
+    DeviceData* dd; uint64_t ser;
+    ~SerialDone() {
+      {
+        std::lock_guard<std::mutex> l(dd->cbLock);
+        dd->submittedSerial = std::max(dd->submittedSerial, ser);
+      }
+      dd->cbCv.notify_all();
+      RunDeferred(dd, false);
+    }
+  } serialDone{dd, ser};
   if (idx >= sc->v.size()) {
     std::lock_guard<std::mutex> l(qi->m);
     ReleaseHeldLocked(dd, queue);
@@ -2300,12 +2815,30 @@ VkResult PresentReplay(DeviceData* dd, VkQueue queue, Swapchain* sc, uint32_t id
   si[nsi - 1].signalSemaphoreCount = mirror ? 1 : 0;
   si[nsi - 1].pSignalSemaphores = &vi.doneSem;
 
+  VkFence serFence = VK_NULL_HANDLE;
+  const int sk = int(ser % 8);
+  if (doReplay) {
+    if (!dd->serialFence[sk]) {
+      VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+      fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+      dd->d.CreateFence(dd->device, &fci, nullptr, &dd->serialFence[sk]);
+    }
+    serFence = dd->serialFence[sk];
+    dd->d.WaitForFences(dd->device, 1, &serFence, VK_TRUE, 2000000000ull);
+    dd->d.ResetFences(dd->device, 1, &serFence);
+  }
   VkResult result;
   {
     dd->stage = "present(replay): submitting replay";
     std::lock_guard<std::mutex> l(qi->m);
     VkResult sr = dd->d.QueueSubmit(queue, nsi, si, vi.fence);
     if (sr == VK_SUCCESS && slot >= 0) SubmitSlotFence(dd, queue, ex, slot);
+    if (serFence) {
+      VkSubmitInfo e{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+      dd->d.QueueSubmit(queue, 1, &e, serFence);
+      std::lock_guard<std::mutex> cl(dd->cbLock);
+      dd->serialOf[sk] = ser;
+    }
     dd->stage = "present(replay): presenting window";
     ReleaseHeldLocked(dd, queue);
     if (sr != VK_SUCCESS) return sr;
@@ -2414,9 +2947,16 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_QueuePresentKHR(VkQueue queue, const VkPrese
   X(QueueSubmit2KHR) X(QueueWaitIdle) X(QueueBindSparse) X(DeviceWaitIdle) X(CreateShaderModule) \
   X(DestroyShaderModule) X(CreateGraphicsPipelines) X(CreateSwapchainKHR) X(DestroySwapchainKHR) \
   X(GetSwapchainImagesKHR) X(AcquireNextImageKHR) X(AcquireNextImage2KHR) X(QueuePresentKHR)          \
-  X(CmdSetViewport) X(CmdSetViewportWithCount) X(CmdSetViewportWithCountEXT)
-#define REPLAY_HOOKS(X) \
-  X(WaitForFences) X(WaitSemaphores) X(WaitSemaphoresKHR) X(CreateSemaphore) X(DestroySemaphore) X(BeginCommandBuffer)
+  X(CmdSetViewport) X(CmdSetViewportWithCount) X(CmdSetViewportWithCountEXT) X(BeginCommandBuffer)            \
+  X(EndCommandBuffer) X(CmdBeginRenderPass) X(CmdBeginRenderPass2) X(CmdBeginRenderPass2KHR) X(CmdBeginRendering)  \
+  X(CmdBeginRenderingKHR)
+#define REPLAY_HOOKS(X)                                                                                        \
+  X(WaitForFences) X(WaitSemaphores) X(WaitSemaphoresKHR) X(CreateSemaphore) X(DestroySemaphore) X(GetFenceStatus) \
+  X(GetSemaphoreCounterValue) X(GetSemaphoreCounterValueKHR) \
+  X(ResetCommandBuffer) X(AllocateCommandBuffers) X(FreeCommandBuffers) X(ResetCommandPool) X(DestroyCommandPool)     \
+  X(DestroyBuffer) X(DestroyImage) X(FreeMemory) X(DestroyImageView) X(DestroyBufferView) X(DestroySampler)          \
+  X(DestroyPipeline) X(DestroyFramebuffer) X(DestroyQueryPool) X(DestroyDescriptorPool) X(DestroyEvent)              \
+  X(ResetDescriptorPool) X(FreeDescriptorSets)
 
 PFN_vkVoidFunction DeviceHook(const char* name) {
 #define CHECK(n) if (!strcmp(name, "vk" #n)) return (PFN_vkVoidFunction)&hook_##n;

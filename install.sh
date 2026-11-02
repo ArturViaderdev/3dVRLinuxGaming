@@ -44,7 +44,7 @@ echo "  lanzador -> $HOME/.local/bin/vrlinux-run"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/vrlinux"
 mkdir -p "$CFG"
 update_default() {  # $1 = config dir: new defaults replace an older default.conf (kept as .old)
-  if [ -f "$1/default.conf" ] && ! grep -q "vrlinux-config-version 6" "$1/default.conf"; then
+  if [ -f "$1/default.conf" ] && ! grep -q "vrlinux-config-version 7" "$1/default.conf"; then
     mv -f "$1/default.conf" "$1/default.conf.old"
     echo "  default.conf actualizado (el anterior queda en default.conf.old)"
   fi
