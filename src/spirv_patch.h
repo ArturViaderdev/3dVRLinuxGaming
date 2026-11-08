@@ -26,13 +26,31 @@ constexpr int kParamFloats = 20;  // 80 bytes per eye (m16 = depth clamp flag)
 
 enum class PatchResult { Patched, NoPosition, NoEntryPoint, Unsupported, Error };
 
+// Depth / hybrid modes: the patched shaders also store (game clip w, game clip z) samples of some
+// perspective vertices into the parameter buffer (8-byte slots at paramAddress + kCalibOffset)
+// while the float at paramAddress + kCalibFlagOffset is > 0.5 (1 + scene stage), so the layer can
+// recover the projection's depth mapping (needs vertexPipelineStoresAndAtomics).
+constexpr uint32_t kCalibFlagOffset = 96;
+constexpr uint32_t kCalibOffset = 1024;
+constexpr uint32_t kCalibSlots = 256;   // 4 stages of 64
+constexpr uint32_t kCalibGroupSlots = 64;
+constexpr uint32_t kStatsOffset = 3072;  // depth orientation counters
+
 // execModel: SPIR-V ExecutionModel (0 = Vertex, 2 = TessellationEvaluation, 3 = Geometry)
 PatchResult PatchStereo(const uint32_t* code, size_t wordCount, const char* entryName,
                         uint32_t execModel, uint64_t paramAddress,
-                        std::vector<uint32_t>& out, std::string* log = nullptr);
+                        std::vector<uint32_t>& out, std::string* log = nullptr, bool calib = false);
 
 // Quick scan: does this module contain an entry point that could need patching?
 bool HasPreRasterEntryPoint(const uint32_t* code, size_t wordCount);
+
+// Fragment / compute shaders: corrects the screen-space position rebuilds of deferred engines
+// (Unreal Engine shadow projection, lights...): ScreenPos.xy * SceneW becomes the game's own clip
+// x, y (the eye transform params[0..11] undone), mixed in by params[25] (1 on, 0 off).
+// NoPosition = nothing to correct.
+constexpr uint32_t kFixFactorOffset = 100;  // float: params[25]
+PatchResult PatchScreenSpace(const uint32_t* code, size_t wordCount, uint64_t paramAddress,
+                             std::vector<uint32_t>& out, std::string* log = nullptr);
 
 const char* PatchResultName(PatchResult r);
 

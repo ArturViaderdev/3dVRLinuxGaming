@@ -26,6 +26,8 @@ struct Config {
   float lookLimit = 0.0f;      // shader look: max head rotation drawn (degrees, 0 = no limit); beyond it the image stays put
   int flipY = -1;              // clip-space Y points down: -1 auto (viewport sign), 0 no, 1 yes
   float overscan = 1.05f;      // shader look: render a bit more than the headset FOV (for reprojection)
+  int fixShadows = 2;          // screen-space position rebuilds corrected (Unreal shadows): 0 off, 1 on, 2 auto
+  bool fixShadowsOn = true;    // runtime switch (Ctrl+Shift+Pause) to compare with / without
   bool offscreenMono = true;   // passes whose shape differs from the game frame (shadow maps) get no eye transform
   bool depthClamp = true;      // shader look: keep geometry beside/behind the game camera inside the depth range
   int renderW = -1, renderH = -1;  // size reported to native Vulkan games (-1 auto, 0 off)
@@ -45,7 +47,7 @@ struct Config {
   int logLevel = 1;
   bool hotkeys = true;
   bool passthrough = false;    // launcher/helper process: layer does nothing
-  int mode = 1;                // 1 replay (both eyes every game frame), 0 alternate
+  int mode = 1;                // 1 replay (both eyes every game frame), 0 alternate, 2 depth, 3 hybrid
   float fpsLimit = 0.0f;       // stereo frames per second. 0 = headset refresh rate, <0 = no limit
   bool autoSwitch = true;
   bool replayRelaxed = true;   // replay even when the game needs GPU results mid-frame (readbacks, vkd3d)
@@ -56,6 +58,7 @@ float HudFactor();            // screen mode: 1 - convergence / hud_depth
 void LoadConfig();
 void SaveConfig();
 const std::string& GameName();
+const char* ModeName(int mode);
 std::string ProfilePath();
 uint32_t RecenterRequests();  // incremented by Ctrl+Shift+Home
 

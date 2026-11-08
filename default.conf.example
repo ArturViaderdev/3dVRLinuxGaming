@@ -70,6 +70,10 @@ depth_clamp = 1
 # 1 = las pasadas que no son la camara del juego (mapas de sombras, reflejos: texturas cuadradas o 2:1)
 #     se dibujan sin el desplazamiento de cada ojo. Si las sombras se ven mal en un juego, prueba 0.
 offscreen_mono = 1
+# Sombras y luces de Unreal Engine (EDF World Brothers 2, Tron...): las pasadas que reconstruyen la posicion
+# de cada pixel se corrigen para cada ojo. auto = activo (los mapas de sombras de 16 bits sin
+# transformacion solo en juegos Unreal) | 1 = siempre todo | 0 = no. Ctrl+Shift+Pausa lo apaga/enciende.
+fix_shadows = auto
 
 # ---------------------------------------------------------------- resolucion y escritorio
 # Resolucion a la que se dibuja cada ojo en juegos Vulkan NATIVOS (Burnout...): auto = segun el visor
@@ -93,7 +97,11 @@ hud_depth = 0
 swap_eyes = 0
 stereo = 1
 # replay    = cada fotograma se dibuja dos veces (un ojo cada vez): los dos ojos del mismo instante (recomendado)
-# alternate = un fotograma para cada ojo (la mitad de fps por ojo; solo si replay da imagenes en 2D)
+# hybrid    = cada fotograma se dibuja para un ojo (alternando) y el otro ojo se reconstruye con la
+#             profundidad de ese fotograma: 60 fps por ojo en juegos donde replay no va (se cuelga, sale en 2D)
+# depth     = cada fotograma se dibuja una vez y los dos ojos se reconstruyen con su profundidad (mas halos)
+# alternate = un fotograma para cada ojo (la mitad de fps por ojo)
+# hybrid y depth necesitan DXVK / VKD3D-Proton (juegos de Proton)
 mode = replay
 auto_switch = 1
 # Limite de FPS del juego: auto = frecuencia del visor (72/90/120 Hz) | off | numero

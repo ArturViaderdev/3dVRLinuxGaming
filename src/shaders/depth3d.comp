@@ -1,0 +1,228 @@
+// vrlinux - depth / hybrid modes (ported from 3dvisionlinux): eyes rebuilt from one game frame
+// and its depth buffer.
+// PASS 0 (splat): every game pixel is pushed to where it lands in each eye; the nearest wins.
+// PASS 1 (resolve): each eye pixel takes the colour of the game pixel that won it; holes
+//                   (background uncovered by the shift) take the farther neighbour, or in hybrid
+//                   mode the last real image of that eye (rendered one frame ago from that eye).
+// Where a pixel lands: the game frame was drawn through the clip transform Ms (3x4, the one the
+// patched shaders applied: VR reprojection or classic screen stereo). From the pixel's position
+// and the game's 1/w (depth buffer + calibrated projection) the game clip position is recovered
+// (X = (x, y, 1, 1/w) up to scale), and projected with the eye's transform Me.
+// Compile: glslangValidator -V --target-env vulkan1.2 -DPASS=0 depth3d.comp (see gen.sh)
+#version 450
+#extension GL_EXT_buffer_reference : require
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer U32s { uint v[]; };
+layout(push_constant) uniform PC {
+  U32s color;   // game image, W*H 32-bit pixels
+  U32s depth;   // raw depth copies, one per scene stage (meta[25] words apart)
+  U32s keys;    // 2*W*H: winner per eye pixel ((nearness+1) << 13 | centre << 12 | source x), 0 = empty
+  U32s outc;    // 2*W*H: eye images
+  U32s meta;    // stage s: [4s] Dw [4s+1] Dh [4s+2] format 0 f32, 1 unorm24, 2 unorm16;
+                // [16+s] A, [20+s] B of its projection (float bits); [24] stages of this frame; [25] stride;
+                // [26] 1 = the depth is upside down; [27] clip y sign (float, +1 = y up);
+                // [32..43] Ms, [44..55] M eye 0, [56..67] M eye 1 (rows of 4 floats)
+  uint W, H;
+  float a, b;   // b != 0: depth available this frame
+  float maxShift;  // < 0: debug, show the depth
+  uint eyes;    // bit e: rebuild eye e
+  U32s prev;    // hybrid: 2*W*H last real image of each eye
+  uint hyb;     // hybrid: bit 0 prev of the rebuilt eye valid, bit 1 prev of the real eye valid,
+                // bit 4 = the real eye (the colour image belongs to it)
+  U32s stats;   // [0..3] orientation test: depth edges / edges also in the colour, normal and flipped
+} pc;
+
+bool Same(uint a, uint b) {
+  uvec4 d = uvec4(abs(ivec4(unpackUnorm4x8(a) * 255.0) - ivec4(unpackUnorm4x8(b) * 255.0)));
+  return max(max(d.x, d.y), max(d.z, d.w)) <= 6u;
+}
+uint Diff(uint a, uint b) {
+  uvec4 d = uvec4(abs(ivec4(unpackUnorm4x8(a) * 255.0) - ivec4(unpackUnorm4x8(b) * 255.0)));
+  return max(max(d.x, d.y), max(d.z, d.w));
+}
+float Luma(uint c) { vec4 v = unpackUnorm4x8(c); return dot(v.rgb, vec3(0.3, 0.59, 0.11)); }
+float MF(uint i) { return uintBitsToFloat(pc.meta.v[i]); }
+vec4 Row(uint m, uint r) { uint b = m + 4u * r; return vec4(MF(b), MF(b + 1u), MF(b + 2u), MF(b + 3u)); }
+
+float DepthAt(uint stage, uint idx, uint fmt) {
+  uint base = stage * pc.meta.v[25];
+  if (fmt == 2u) {
+    uint word = pc.depth.v[base + (idx >> 1)];
+    return float((idx & 1u) != 0u ? (word >> 16) : (word & 0xFFFFu)) / 65535.0;
+  }
+  if (fmt == 1u) return float(pc.depth.v[base + idx] & 0xFFFFFFu) / 16777215.0;
+  return uintBitsToFloat(pc.depth.v[base + idx]);
+}
+
+// the scene rectangle in the image: a depth with another shape is the scene shown with black bars
+vec4 SceneRect() {
+  uint mask = pc.meta.v[24];
+  for (int s = 3; s >= 0; --s) {
+    if ((mask & (1u << uint(s))) == 0u || pc.meta.v[4 * s + 1] == 0u) continue;
+    float ad = float(pc.meta.v[4 * s]) / float(pc.meta.v[4 * s + 1]), ai = float(pc.W) / float(pc.H);
+    if (abs(ad / ai - 1.0) <= 0.01) break;
+    if (ad < ai) { float rw = float(pc.H) * ad; return vec4((float(pc.W) - rw) * 0.5, 0.0, rw, float(pc.H)); }
+    float rh = float(pc.W) / ad;
+    return vec4(0.0, (float(pc.H) - rh) * 0.5, float(pc.W), rh);
+  }
+  return vec4(0.0, 0.0, float(pc.W), float(pc.H));
+}
+
+// 1/w (game units) of the game pixel (x, y): 0 = nothing drawn (far), -1 = black bars / no depth
+float InvWFlip(uint x, uint y, uint flip) {
+  if (pc.b == 0.0) return -1.0;
+  uint mask = pc.meta.v[24];
+  for (int s = 3; s >= 0; --s) {
+    if ((mask & (1u << uint(s))) == 0u) continue;
+    uint Dw = pc.meta.v[4 * s], Dh = pc.meta.v[4 * s + 1], fmt = pc.meta.v[4 * s + 2];
+    if (Dw == 0u || Dh == 0u) continue;
+    float ad = float(Dw) / float(Dh), ai = float(pc.W) / float(pc.H);
+    float rx0 = 0.0, ry0 = 0.0, rw = float(pc.W), rh = float(pc.H);
+    if (abs(ad / ai - 1.0) > 0.01) {
+      if (ad < ai) { rw = float(pc.H) * ad; rx0 = (float(pc.W) - rw) * 0.5; }
+      else { rh = float(pc.W) / ad; ry0 = (float(pc.H) - rh) * 0.5; }
+    }
+    float u = (float(x) + 0.5 - rx0) / rw, v = (float(y) + 0.5 - ry0) / rh;
+    if (u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) return -1.0;
+    if (flip != 0u) v = 1.0 - v;
+    uint idx = min(uint(v * float(Dh)), Dh - 1u) * Dw + min(uint(u * float(Dw)), Dw - 1u);
+    float z = DepthAt(uint(s), idx, fmt);
+    if (z <= 0.0 || z >= 1.0) continue;
+    float iw = (z - MF(16u + uint(s))) / MF(20u + uint(s));
+    if (iw > 0.0) return min(iw, 1.0e30);
+  }
+  return 0.0;
+}
+float InvWAt(uint x, uint y) { return InvWFlip(x, y, pc.meta.v[26]); }
+
+// horizontal shift (pixels) of the game pixel (x, y) with 1/w = iw into eye e
+float ShiftOf(uint x, uint y, float iw, uint e, vec4 rc) {
+  if (iw < 0.0) return 0.0;
+  float u = (float(x) + 0.5 - rc.x) / rc.z * 2.0 - 1.0;
+  float vv = (float(y) + 0.5 - rc.y) / rc.w * 2.0 - 1.0;
+  float v = MF(27u) > 0.0 ? -vv : vv;
+  vec4 S0 = Row(32u, 0u), S1 = Row(32u, 1u), S2 = Row(32u, 2u);
+  // (S0 - u S2) . X = 0, (S1 - v S2) . X = 0 with X = (a, b, 1, iw)
+  vec4 P = S0 - u * S2, Q = S1 - v * S2;
+  float det = P.x * Q.y - P.y * Q.x;
+  if (abs(det) < 1.0e-12) return 0.0;
+  float r0 = -(P.z + P.w * iw), r1 = -(Q.z + Q.w * iw);
+  vec4 X = vec4((r0 * Q.y - P.y * r1) / det, (P.x * r1 - Q.x * r0) / det, 1.0, iw);
+  uint m = 44u + 12u * e;
+  float wo = dot(Row(m, 2u), X);
+  if (wo <= 1.0e-12) return 0.0;
+  float uo = dot(Row(m, 0u), X) / wo;
+  return (uo - u) * rc.z * 0.5;
+}
+
+void main() {
+  uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+  if (x >= pc.W || y >= pc.H) return;
+  uint WH = pc.W * pc.H;
+#if PASS == 0
+  bool have = pc.b != 0.0;
+  // orientation test on a sparse grid: do the depth edges match the colour edges as is, or upside down?
+  if (have && (x & 7u) == 0u && (y & 7u) == 0u && x + 3u < pc.W) {
+    bool colEdge = abs(Luma(pc.color.v[y * pc.W + x]) - Luma(pc.color.v[y * pc.W + x + 3u])) > 0.09;
+    for (uint h = 0u; h < 2u; ++h) {
+      float a = max(InvWFlip(x, y, h), 0.0), b = max(InvWFlip(x + 3u, y, h), 0.0);
+      bool dEdge = (a > 0.0 || b > 0.0) && max(a, b) > 1.25 * min(a, b);
+      if (dEdge) {
+        atomicAdd(pc.stats.v[2u * h], 1u);
+        if (colEdge) atomicAdd(pc.stats.v[2u * h + 1u], 1u);
+      }
+    }
+  }
+  float invW = -1.0;
+  if (have) {
+    // nearest of five neighbours: edge pixels (blends of object and background from antialiasing,
+    // TAA or scaling) move with the object instead of being left behind as a halo
+    for (int o = -2; o <= 2; ++o) invW = max(invW, InvWAt(uint(clamp(int(x) + o, 0, int(pc.W) - 1)), y));
+  }
+  vec4 rc = SceneRect();
+  uint key = (((floatBitsToUint(max(invW, 0.0)) >> 12) + 1u) << 13) | x;
+  for (uint e = 0u; e < 2u; ++e) {
+    if ((pc.eyes & (1u << e)) == 0u) continue;
+    float shift = have ? clamp(ShiftOf(x, y, invW, e, rc), -pc.maxShift, pc.maxShift) : 0.0;
+    // the pixel goes to the two eye pixels around its shifted position (no cracks where the image
+    // stretches); the one that holds its centre has priority (no half-pixel bias)
+    int i0 = int(floor(float(x) + shift));
+    int ic = int(floor(float(x) + 0.5 + shift));
+    for (int j = 0; j < 2; ++j) {
+      int xi = i0 + j;
+      uint kk = key | (xi == ic ? 4096u : 0u);
+      if (xi >= 0 && xi < int(pc.W)) atomicMax(pc.keys.v[e * WH + y * pc.W + uint(xi)], kk);
+    }
+  }
+#else
+  if (pc.maxShift < 0.0) {  // debug (VRLINUX_DEPTH_SHOW=1): both eyes show the depth as grey
+    float iw = max(InvWAt(x, y), 0.0);
+    float d = 1.0 / (1.0 + 4.0 * iw);
+    uint g = uint(clamp(d, 0.0, 1.0) * 255.0);
+    pc.outc.v[y * pc.W + x] = 0xFF000000u | (g << 16) | (g << 8) | g;
+    pc.outc.v[WH + y * pc.W + x] = 0xFF000000u | (g << 16) | (g << 8) | g;
+    return;
+  }
+  // hybrid: what did not move on screen since the last real image of the real eye (HUD, text,
+  // the player followed by the camera, a still scene) is taken from the last real image of the
+  // rebuilt eye instead of being rebuilt
+  uint realE = (pc.hyb >> 4) & 1u;
+  bool still = false;
+  if ((pc.hyb & 3u) == 3u) {
+    still = true;
+    for (int o = -1; o <= 1 && still; ++o) {
+      uint xx = uint(clamp(int(x) + o, 0, int(pc.W) - 1));
+      still = Same(pc.color.v[y * pc.W + xx], pc.prev.v[realE * WH + y * pc.W + xx]);
+    }
+  }
+  for (uint e = 0u; e < 2u; ++e) {
+    if ((pc.eyes & (1u << e)) == 0u) continue;
+    uint row = e * WH + y * pc.W;
+    if (still && e != realE) {
+      pc.outc.v[row + x] = pc.prev.v[row + x];
+      continue;
+    }
+    uint key = pc.keys.v[row + x];
+    uint sx = x;
+    if (key == 0u && (pc.hyb & 1u) != 0u) {
+      // hybrid: the uncovered background was really seen by this eye one frame ago
+      pc.outc.v[row + x] = pc.prev.v[row + x];
+      continue;
+    }
+    if (key == 0u) {
+      // A hole: background uncovered next to a nearer object. Continue the background by
+      // mirroring it across the edge, skipping the blended edge pixels.
+      uint kl = 0u, kr = 0u, rl = 0u, rr = 0u;
+      for (uint r = 1u; r <= 96u && kl == 0u && r <= x; ++r) { kl = pc.keys.v[row + x - r]; rl = r; }
+      for (uint r = 1u; r <= 96u && kr == 0u && x + r < pc.W; ++r) { kr = pc.keys.v[row + x + r]; rr = r; }
+      bool left = kl != 0u && (kr == 0u || (kl >> 13) < (kr >> 13));
+      uint k2 = left ? kl : kr;
+      if (k2 != 0u) {
+        int edge = int(k2 & 0xFFFu);
+        int near = left ? edge - 2 : edge + 2;
+        int cand = left ? near - int(rl) : near + int(rr);
+        near = clamp(near, 0, int(pc.W) - 1);
+        cand = clamp(cand, 0, int(pc.W) - 1);
+        float bg = uintBitsToFloat(((k2 >> 13) - 1u) << 12);
+        float iw = InvWAt(uint(cand), y);
+        sx = uint(iw > bg * 1.15 + 1.0e-6 ? near : cand);
+      }
+    } else {
+      sx = key & 0xFFFu;
+    }
+    uint c = pc.color.v[y * pc.W + sx];
+    if ((pc.hyb & 1u) != 0u && e != realE && sx != x) {
+      // HUD, crosshair, markers, menus are not in the depth: they belong where they are drawn.
+      // Evidence: the last real image of this eye matches the pixel left in place much better.
+      uint ref = pc.prev.v[row + x], z = pc.color.v[y * pc.W + x];
+      uint dZ = Diff(z, ref);
+      uint xl = x > 0u ? x - 1u : x, xr = min(x + 1u, pc.W - 1u);
+      uint agree = (dZ <= 6u ? 1u : 0u) +
+                   (Diff(pc.color.v[y * pc.W + xl], pc.prev.v[e * WH + y * pc.W + xl]) <= 6u ? 1u : 0u) +
+                   (Diff(pc.color.v[y * pc.W + xr], pc.prev.v[e * WH + y * pc.W + xr]) <= 6u ? 1u : 0u);
+      if (agree == 3u && Diff(c, ref) > dZ + 40u) c = z;
+    }
+    pc.outc.v[row + x] = c;
+  }
+#endif
+}

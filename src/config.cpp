@@ -75,6 +75,9 @@ static int ParsePresentMode(const char* s, int def) {
   if (!strcasecmp(s, "fifo_relaxed")) return 3;
   return def;
 }
+const char* ModeName(int mode) {
+  return mode == 1 ? "replay" : mode == 2 ? "depth" : mode == 3 ? "hybrid" : "alternate";
+}
 static const char* PresentModeName(int m) {
   switch (m) { case 0: return "immediate"; case 1: return "mailbox"; case 3: return "fifo_relaxed"; default: return "fifo"; }
 }
@@ -108,6 +111,10 @@ static void ApplyKey(const char* key, const char* val) {
   else if (!strcmp(key, "overscan") && ParseFloat(val, f)) c.overscan = std::clamp(f, 1.0f, 1.5f);
   else if (!strcmp(key, "depth_clamp") && ParseBool(val, b)) c.depthClamp = b;
   else if (!strcmp(key, "offscreen_mono") && ParseBool(val, b)) c.offscreenMono = b;
+  else if (!strcmp(key, "fix_shadows")) {
+    if (!strcasecmp(val, "auto")) c.fixShadows = 2;
+    else if (ParseBool(val, b)) c.fixShadows = b ? 1 : 0;
+  }
   else if (!strcmp(key, "mirror") && ParseBool(val, b)) c.mirror = b;
   else if (!strcmp(key, "render_size")) {
     unsigned w = 0, h = 0;
@@ -130,7 +137,8 @@ static void ApplyKey(const char* key, const char* val) {
     else if (!strcasecmp(val, "off") || !strcasecmp(val, "none")) c.fpsLimit = -1.0f;
     else if (ParseFloat(val, f)) c.fpsLimit = f;
   }
-  else if (!strcmp(key, "mode")) c.mode = !strcasecmp(val, "replay") ? 1 : 0;
+  else if (!strcmp(key, "mode"))
+    c.mode = !strcasecmp(val, "replay") ? 1 : !strcasecmp(val, "depth") ? 2 : !strcasecmp(val, "hybrid") ? 3 : 0;
   else if (!strcmp(key, "hide_extensions") && ParseBool(val, b)) c.hideExtensions = b;
   else if (!strcmp(key, "patch_shaders") && ParseBool(val, b)) c.patchShaders = b;
   else if (!strcmp(key, "log_level") && ParseFloat(val, f)) c.logLevel = int(f);
@@ -206,7 +214,7 @@ static void LoadEnv() {
       {"VRLINUX_HUD_SCALE", "hud_scale"},     {"VRLINUX_FLIP_Y", "flip_y"},
       {"VRLINUX_RENDER_SIZE", "render_size"}, {"VRLINUX_MIRROR", "mirror"},
       {"VRLINUX_OVERSCAN", "overscan"},       {"VRLINUX_HUD_FOLLOW", "hud_follow"},
-      {"VRLINUX_LOOK_LIMIT", "look_limit"},     {"VRLINUX_DEPTH_CLAMP", "depth_clamp"}, {"VRLINUX_OFFSCREEN_MONO", "offscreen_mono"},
+      {"VRLINUX_LOOK_LIMIT", "look_limit"},     {"VRLINUX_DEPTH_CLAMP", "depth_clamp"}, {"VRLINUX_OFFSCREEN_MONO", "offscreen_mono"}, {"VRLINUX_FIX_SHADOWS", "fix_shadows"},
       {"VRLINUX_SCREEN_WIDTH", "screen_width"}, {"VRLINUX_SCREEN_DISTANCE", "screen_distance"},
       {"VRLINUX_SEP", "separation"},          {"VRLINUX_CONV", "convergence"},
       {"VRLINUX_SWAP", "swap_eyes"},          {"VRLINUX_STEREO", "stereo"},
@@ -291,7 +299,7 @@ void LoadConfig() {
   Log(1, "game=%s profile=%s%s display=%s look=%s fov=%.1f(%s) world_scale=%.3f mouse_sens=%.2f mode=%s",
       g_game.c_str(), g_profile.c_str(), had ? "" : " (new)", g_cfg.display ? "screen" : "vr",
       g_cfg.look == 2 ? "shader" : g_cfg.look ? "mouse" : "none", g_cfg.fov, g_cfg.fovAxis ? "v" : "h", g_cfg.worldScale, g_cfg.mouseSens,
-      g_cfg.mode ? "replay" : "alternate");
+      ModeName(g_cfg.mode));
 }
 
 void SaveConfig() {
@@ -309,6 +317,7 @@ void SaveConfig() {
   fprintf(f, "positional = %d\npositional_limit = %.3f\nfov = %.2f\nfov_axis = %s\nworld_scale = %.5f\n",
           c.positional, c.posLimit, c.fov, c.fovAxis ? "v" : "h", c.worldScale);
   fprintf(f, "hud_follow = %d\nlook_limit = %.1f\n", c.hudFollow, c.lookLimit);
+  fprintf(f, "fix_shadows = %s\n", c.fixShadows == 2 ? "auto" : c.fixShadows ? "1" : "0");
   fprintf(f, "flip_y = %s\noverscan = %.3f\ndepth_clamp = %d\noffscreen_mono = %d\nmirror = %d\n",
           c.flipY < 0 ? "auto" : c.flipY ? "1" : "0", c.overscan, c.depthClamp, c.offscreenMono, c.mirror);
   if (c.renderW < 0) fprintf(f, "render_size = auto\n");
@@ -319,7 +328,7 @@ void SaveConfig() {
   fprintf(f, "separation = %.5f\nconvergence = %.5f\nhud_depth = %.4f\nswap_eyes = %d\nstereo = %d\n", c.separation,
           c.convergence, c.hudDepth, c.swapEyes, c.stereo);
   fprintf(f, "replay_relaxed = %d\n", c.replayRelaxed);
-  fprintf(f, "mode = %s\nauto_switch = %d\npresent_mode = %s\n", c.mode ? "replay" : "alternate", c.autoSwitch,
+  fprintf(f, "mode = %s\nauto_switch = %d\npresent_mode = %s\n", ModeName(c.mode), c.autoSwitch,
           PresentModeName(c.presentMode));
   if (c.fpsLimit == 0) fprintf(f, "fps_limit = auto\n");
   else if (c.fpsLimit < 0) fprintf(f, "fps_limit = off\n");
@@ -345,9 +354,9 @@ struct X11 {
 X11 g_x;
 
 enum Key { kCtrlL, kCtrlR, kShiftL, kShiftR, kF1, kF2, kF3, kF4, kF5, kF6, kF7, kF8, kF9, kF10, kF11,
-           kPgUp, kPgDn, kHome, kEnd, kIns, kDel, kCount };
+           kPgUp, kPgDn, kHome, kEnd, kIns, kDel, kPause, kCount };
 const unsigned long kSyms[kCount] = {0xFFE3, 0xFFE4, 0xFFE1, 0xFFE2, 0xFFBE, 0xFFBF, 0xFFC0, 0xFFC1, 0xFFC2, 0xFFC3,
-                                     0xFFC4, 0xFFC5, 0xFFC6, 0xFFC7, 0xFFC8, 0xFF55, 0xFF56, 0xFF50, 0xFF57, 0xFF63, 0xFFFF};
+                                     0xFFC4, 0xFFC5, 0xFFC6, 0xFFC7, 0xFFC8, 0xFF55, 0xFF56, 0xFF50, 0xFF57, 0xFF63, 0xFFFF, 0xFF13};
 
 bool InitX11() {
   if (g_x.tried) return g_x.ok;
@@ -365,7 +374,7 @@ bool InitX11() {
   Log(1, "hotkeys (Ctrl+Shift+): F1/F2 FOV -/+ | F3/F4 world scale (screen: separation) | F5/F6 mouse sens "
          "(screen: convergence) | F7 swap eyes | F8 3D on/off | F9 save | F10 screen/immersive | F11 head rotation on/off | "
          "Home recenter | End positional on/off | PgUp/PgDn HUD (screen: distance) | Insert HUD follows head | "
-         "Delete head turn limit");
+         "Delete head turn limit | Pause shadow fix on/off");
   return true;
 }
 
@@ -439,6 +448,11 @@ bool PollControls() {
     c.lookLimit = (kL[i] == c.lookLimit) ? kL[(i + 1) % 5] : 0.0f;
     changed = true;
     if (c.lookLimit > 0) Log(1, "look_limit=%.0f degrees", c.lookLimit); else Log(1, "look_limit off");
+  }
+  if (pressed(kPause)) {
+    c.fixShadowsOn = !c.fixShadowsOn;
+    changed = true;
+    Log(1, "fix_shadows corrections %s", c.fixShadowsOn ? "ON" : "OFF");
   }
   if (pressed(kEnd)) { c.positional = !c.positional; changed = true; Log(1, "positional=%d", c.positional); }
   static bool wasAdjusting = false;

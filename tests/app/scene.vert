@@ -22,5 +22,9 @@ void main() {
     p = vec3(xo[k] + (c[v].x - 0.5) * s[k], -1.6 + c[v].y * s[k] * 1.4, depth[k]);
     col = cols[k];
   }
+  // gl_InstanceIndex (APP_DEPTH: frame number) moves the scene by a hair: like a game's camera,
+  // the vertices are never exactly the same from one frame to the next
+  float o = float(gl_InstanceIndex % 64) * 0.0007 + float(q) * 0.0001;
+  p += vec3(o);
   gl_Position = proj(p);
 }

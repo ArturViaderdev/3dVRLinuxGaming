@@ -21,6 +21,9 @@ enum : uint32_t {
   OpLoad = 61, OpStore = 62, OpAccessChain = 65,
   OpDecorate = 71, OpMemberDecorate = 72, OpDecorationGroup = 73, OpGroupDecorate = 74,
   OpGroupMemberDecorate = 75,
+  OpConvertFToU = 109, OpUConvert = 113, OpBitcast = 124, OpIAdd = 128, OpISub = 130, OpIMul = 132,
+  OpShiftRightLogical = 194, OpShiftLeftLogical = 196, OpBitwiseOr = 197, OpBitwiseXor = 198, OpBitwiseAnd = 199,
+  OpIEqual = 170, OpSelectionMerge = 247, OpLabel = 248, OpBranch = 249, OpBranchConditional = 250,
   OpCompositeConstruct = 80, OpCompositeExtract = 81, OpCompositeInsert = 82, OpConvertUToPtr = 120,
   OpFAdd = 129, OpFSub = 131, OpFMul = 133, OpFDiv = 136, OpLogicalOr = 166, OpLogicalAnd = 167, OpSelect = 169, OpFOrdEqual = 180,
   OpFOrdNotEqual = 182, OpFOrdLessThan = 184, OpFOrdGreaterThan = 186,
@@ -118,7 +121,7 @@ bool HasPreRasterEntryPoint(const uint32_t* code, size_t n) {
 }
 
 PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, uint32_t execModel,
-                        uint64_t paramAddress, std::vector<uint32_t>& out, std::string* log) {
+                        uint64_t paramAddress, std::vector<uint32_t>& out, std::string* log, bool calib) {
   std::vector<Inst> insts;
   if (!ParseInsts(code, n, insts)) return PatchResult::Error;
   if (execModel != 0 && execModel != 2 && execModel != 3) return PatchResult::Unsupported;
@@ -244,6 +247,16 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
   uint32_t idMember = (posMember != UINT32_MAX) ? fresh() : 0;
 
   const bool isGeometry = (execModel == 3);
+  // projection samples: only at OpReturn sites (splitting a geometry shader's block around
+  // OpEmitVertex could break structured control flow)
+  if (isGeometry) calib = false;
+  uint32_t idPtrU64 = 0, idK63 = 0, idK6 = 0, idK3 = 0, idK32 = 0, idOff64 = 0, idK7 = 0, idK18 = 0, idK26 = 0,
+           idKMul = 0, idFlagOff = 0, idC0 = 0, idC1 = 0;
+  if (calib) {
+    idPtrU64 = fresh(); idK63 = fresh(); idK6 = fresh(); idK3 = fresh(); idK32 = fresh(); idOff64 = fresh();
+    idK7 = fresh(); idK18 = fresh(); idK26 = fresh(); idKMul = fresh(); idFlagOff = fresh(); idC0 = fresh();
+    idC1 = fresh();
+  }
   int patchSites = 0;
 
   // --- emit -----------------------------------------------------------------------
@@ -293,6 +306,21 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
       Emit(out, OpConstant, {floatType, idZero, 0u});
       Emit(out, OpConstant, {floatType, idHalf, 0x3F000000u});
       Emit(out, OpConstant, {floatType, idAlmost, 0x3F7FFF58u});  // 0.99999
+      if (calib) {
+        Emit(out, OpTypePointer, {idPtrU64, StoragePhysicalStorageBuffer, idU64});
+        Emit(out, OpConstant, {idU32, idK63, 63});
+        Emit(out, OpConstant, {idU32, idK6, 6});
+        Emit(out, OpConstant, {idU32, idK3, 3});
+        Emit(out, OpConstant, {idU32, idK32, 32});
+        Emit(out, OpConstant, {idU64, idOff64, kCalibOffset, 0});
+        Emit(out, OpConstant, {idU64, idFlagOff, kCalibFlagOffset, 0});
+        Emit(out, OpConstant, {idU32, idK7, 7});
+        Emit(out, OpConstant, {idU32, idK18, 18});
+        Emit(out, OpConstant, {idU32, idK26, 26});
+        Emit(out, OpConstant, {idU32, idKMul, 0x9E3779B1u});
+        Emit(out, OpConstant, {idU32, idC0, 0});
+        Emit(out, OpConstant, {idU32, idC1, 1});
+      }
     }
 
     if (in.op == OpFunction) currentFunc = w[2];
@@ -392,6 +420,59 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
       Emit(out, OpSelect, {F, fw, persp, nw, wv});
       Emit(out, OpCompositeConstruct, {vec4Type, np, fx, fy, fz, fw});
       Emit(out, OpStore, {posPtr, np});
+      if (calib) {
+        // the game's own clip position (before the eye transform):
+        // m = (bits(x) ^ (bits(y) >> 7) ^ bits(w) ^ (bits(z) >> 6)) * 0x9E3779B1
+        // if (flag > 0.5 && w != 1 && (m >> 26) == 0)            (1 vertex in 64)
+        //   slot[(flag - 1) * 64 + ((m >> 18) & 63)] = uint64(bits(w)) | (uint64(bits(z)) << 32)
+        uint32_t fa = fresh(), fp = fresh(), fl = fresh(), on = fresh(), wb = fresh(), xb = fresh(), yb = fresh(),
+                 zb = fresh(), zs = fresh(), ysh = fresh(), h1 = fresh(), h2 = fresh(), h3 = fresh(), hm = fresh(),
+                 hh = fresh(), lo = fresh(), loz = fresh(), c1 = fresh(), cond = fresh(), lStore = fresh(),
+                 lMerge = fresh();
+        Emit(out, OpIAdd, {idU64, fa, idAddr, idFlagOff});
+        Emit(out, OpConvertUToPtr, {idPtrFloat, fp, fa});
+        Emit(out, OpLoad, {F, fl, fp, MemAligned, 4});
+        Emit(out, OpFOrdGreaterThan, {B, on, fl, idHalf});
+        Emit(out, OpBitcast, {idU32, wb, wv});
+        Emit(out, OpBitcast, {idU32, xb, x});
+        Emit(out, OpBitcast, {idU32, yb, y});
+        Emit(out, OpBitcast, {idU32, zb, z});
+        Emit(out, OpShiftRightLogical, {idU32, zs, zb, idK6});
+        Emit(out, OpShiftRightLogical, {idU32, ysh, yb, idK7});
+        Emit(out, OpBitwiseXor, {idU32, h1, xb, ysh});
+        Emit(out, OpBitwiseXor, {idU32, h2, h1, wb});
+        Emit(out, OpBitwiseXor, {idU32, h3, h2, zs});
+        Emit(out, OpIMul, {idU32, hm, h3, idKMul});
+        Emit(out, OpShiftRightLogical, {idU32, hh, hm, idK18});
+        Emit(out, OpShiftRightLogical, {idU32, lo, hm, idK26});
+        Emit(out, OpIEqual, {B, loz, lo, idC0});
+        Emit(out, OpLogicalAnd, {B, c1, on, notPersp});
+        Emit(out, OpLogicalAnd, {B, cond, c1, loz});
+        Emit(out, OpSelectionMerge, {lMerge, 0});
+        Emit(out, OpBranchConditional, {cond, lStore, lMerge});
+        Emit(out, OpLabel, {lStore});
+        uint32_t sh = fresh(), g = fresh(), g1 = fresh(), g2 = fresh(), gs = fresh(), slot = fresh(), so = fresh(),
+                 so64 = fresh(), a1 = fresh(), a2 = fresh(), ptr = fresh(), w64 = fresh(), z64 = fresh(), zh = fresh(),
+                 val = fresh();
+        Emit(out, OpBitwiseAnd, {idU32, sh, hh, idK63});
+        Emit(out, OpConvertFToU, {idU32, g, fl});
+        Emit(out, OpISub, {idU32, g1, g, idC1});
+        Emit(out, OpBitwiseAnd, {idU32, g2, g1, idK3});
+        Emit(out, OpShiftLeftLogical, {idU32, gs, g2, idK6});
+        Emit(out, OpBitwiseOr, {idU32, slot, gs, sh});
+        Emit(out, OpShiftLeftLogical, {idU32, so, slot, idK3});
+        Emit(out, OpUConvert, {idU64, so64, so});
+        Emit(out, OpIAdd, {idU64, a1, idAddr, idOff64});
+        Emit(out, OpIAdd, {idU64, a2, a1, so64});
+        Emit(out, OpConvertUToPtr, {idPtrU64, ptr, a2});
+        Emit(out, OpUConvert, {idU64, w64, wb});
+        Emit(out, OpUConvert, {idU64, z64, zb});
+        Emit(out, OpShiftLeftLogical, {idU64, zh, z64, idK32});
+        Emit(out, OpBitwiseOr, {idU64, val, w64, zh});
+        Emit(out, OpStore, {ptr, val, MemAligned, 8});
+        Emit(out, OpBranch, {lMerge});
+        Emit(out, OpLabel, {lMerge});
+      }
     }
 
     if (in.op == OpMemoryModel && w[1] == AddrLogical) {

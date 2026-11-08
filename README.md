@@ -85,6 +85,7 @@ Keyboard (**Ctrl + Shift + …**; keys can be held to change values continuously
 | F9 | **save this game's profile** | save |
 | Insert | HUD fixed with the game ⇄ HUD follows your head | — |
 | Delete | head turn limit: off → 30° → 45° → 60° → 90° → off | — |
+| Pause | shadow fix (`fix_shadows`) on/off, to compare | same |
 | PgUp / PgDn | HUD closer / farther | screen closer / farther |
 | Home | recenter | recenter |
 | End | head movement (6DOF) on/off | — |
@@ -97,7 +98,7 @@ Keyboard (**Ctrl + Shift + …**; keys can be held to change values continuously
 
 ### Turning the camera with your head (Ctrl+Shift+F11)
 
-The game camera is re-projected in the shaders to your head orientation, on top of what the stick/mouse do. The game only draws what its own camera sees, so when you turn your head far, objects can be missing or broken at the edges: raise the in-game FOV, or set a limit with Ctrl+Shift+Delete (beyond it the image stops turning instead of showing broken graphics). The HUD (scores, markers) stays fixed with the game by default (`hud_follow = 0`); Ctrl+Shift+Insert makes it follow your head. In deferred-rendered games the lighting may not follow the rotation exactly.
+The game camera is re-projected in the shaders to your head orientation, on top of what the stick/mouse do. The game only draws what its own camera sees, so when you turn your head far, objects can be missing or broken at the edges: raise the in-game FOV, or set a limit with Ctrl+Shift+Delete (beyond it the image stops turning instead of showing broken graphics). The HUD (scores, markers) stays fixed with the game by default (`hud_follow = 0`); Ctrl+Shift+Insert makes it follow your head. In deferred-rendered games (Unreal Engine) the shadows and lights are rebuilt for each eye by `fix_shadows` (see below).
 
 ## Configuration
 
@@ -118,14 +119,39 @@ Main options:
 | `fov` / `fov_axis` | `90` / `h` | the game's FOV (horizontal or vertical) |
 | `world_scale` | `1.0` (Unreal: `100`) | immersive 3D strength (game units per metre) |
 | `offscreen_mono` | `1` | shadow maps and other square / 2:1 off-screen passes are drawn without the eye offset |
+| `fix_shadows` | `auto` | Unreal Engine shadows / lights rebuilt for each eye (see below); `0` off |
 | `separation` / `convergence` | `0.015` / `1.5` | screen mode 3D |
 | `screen_distance` / `screen_width` | `3.0` / `5.5` | screen size and distance (m) |
 | `render_size` | `auto` | resolution of native Vulkan games (`auto`, `off`, `1832x2016`…) |
 | `mirror` | `0` | also show the game on the desktop window (can cause stutter) |
-| `mode` | `replay` | `replay` both eyes each frame; `alternate` one frame per eye |
+| `mode` | `replay` | `replay`, `hybrid`, `depth` or `alternate` (see below) |
 | `flip_y` | `auto` | set 1/0 if looking up moves the world the wrong way |
 
+### Modes (`mode`)
+
+| Mode | Each game frame | fps per eye (game at 60) | When |
+|---|---|---|---|
+| `replay` (default) | drawn twice, once per eye | 60 | most games: real 3D in both eyes |
+| `hybrid` | drawn for one eye (alternating); the **other eye is rebuilt from that frame's depth buffer** | 60 | games where replay hangs, stays 2D or is too slow, and alternate gives only 30 per eye |
+| `depth` | drawn once from between the eyes; **both eyes rebuilt** from it and its depth | 60 | same, lightest on the GPU (one render per frame) |
+| `alternate` | drawn for one eye (alternating) | 30 | last resort |
+
+- **hybrid** (from 3dvisionlinux): half of the images you see are real, rendered from the right eye; the background uncovered next to near objects in the rebuilt eye comes from that eye's last real image instead of being invented, so there are far fewer halos than in depth. Menus and loading screens without a 3D scene are shown as in alternate.
+- **depth**: the whole pair comes from one image + its depth: small halos where background is uncovered next to near objects, and the HUD takes the depth of what is behind it.
+- Both need DXVK / VKD3D-Proton (dynamic rendering) and Vulkan 1.2; the log says when a game is not supported. The layer finds the scene's depth buffer by itself and learns how its depth maps to distance from samples stored by the patched shaders (the log says `projection of scene stage N found`; until then the eyes are not rebuilt). Scenes drawn in several stages that clear the depth (several cameras), upside-down depth (Unity) and scenes with black bars are handled.
+- In both modes the two eyes share one frustum (the union of the headset's two), so an eye can be rebuilt from the other by horizontal shifts; this works with head rotation (`head_look`) and in screen mode too.
+- Effects that do not write depth (lasers, smoke, some particles) can be misplaced in the rebuilt eye. `VRLINUX_DEPTH_SHOW=1` shows the captured depth as grey in both eyes (debug).
+- Log line: `hybrid: eyes rebuilt from depth N of M frames`.
+
 Environment variables (highest priority): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`, `VRLINUX_LOOK`, `VRLINUX_FOV`, `VRLINUX_WORLD_SCALE`, `VRLINUX_SEP`, `VRLINUX_CONV`, `VRLINUX_RENDER_SIZE`, `VRLINUX_MIRROR`, `VRLINUX_MODE`, `VRLINUX_HIDE_EXT`, `VRLINUX_LOOK_LIMIT`, `VRLINUX_HUD_FOLLOW`, `VRLINUX_SCREEN_WIDTH`, `VRLINUX_SCREEN_DISTANCE`, `VRLINUX_LOG_LEVEL`, `VRLINUX_IGNORE=Launcher.exe`. Launcher: `VRLINUX_RUNTIME=steamvr|wivrn|/path/runtime.json`.
+
+### Shadows in Unreal Engine games (`fix_shadows`, from 3dvisionlinux)
+
+Unreal Engine (EDF World Brothers 2, Tron Run, Moto Racer 4...) computes shadows, lights, fog and ambient occlusion afterwards, in full-screen passes that rebuild each pixel's 3D position from the depth buffer with the camera's inverse matrix. That matrix knows nothing about the eye transform of the layer, so each eye looked the shadow up in the wrong place. `fix_shadows` (default `auto`) fixes it while the game loads its shaders:
+
+- **Screen-space rebuilds**: in fragment and compute shaders the layer looks for the rebuild pattern (`ScreenPos.x × SceneDepth` and `.y`, then multiplied by a matrix) and replaces it by the game's own position for that pixel: the eye transform (eye position, headset field of view and head rotation, or the screen-mode shift) is undone exactly when x and y are computed together (the usual case), and exactly without head rotation when they are separate. It happens before the driver compiles the shader: no wrong frame and no cost while playing. The pattern is very specific, so it is active in every game; the log says `fix_shadows: N shaders corrected`.
+- **Shadow maps**: Unreal draws them in 16-bit depth without colour and the scene's depth pre-pass in 32 bits, so those pipelines get no eye transform (only in Unreal games, `*-Shipping.exe`, or with `fix_shadows = 1`). `offscreen_mono` covers other games' shadow maps by their shape.
+- Ctrl+Shift+Pause switches the correction off and on to compare.
 
 ## Logs and troubleshooting
 
@@ -139,8 +165,9 @@ Environment variables (highest priority): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`
 | "Unsupported graphics card" | try `VRLINUX_HIDE_EXT=0` (Azimuth already has it in its preset). |
 | Broken graphics when turning the head | raise the in-game FOV or set a limit with Ctrl+Shift+Delete; or turn head rotation off (Ctrl+Shift+F11). |
 | World drifts when turning the head | `fov` does not match the game's FOV: adjust with Ctrl+Shift+F1/F2. |
-| Black or 2D frames now and then | the log line `replay 3D x (relaxed y) / 2D z` counts them; if `2D` keeps growing try `mode = alternate` (half the fps per eye). |
-| Shadows in the wrong place / different in each eye | keep `offscreen_mono = 1`; the log line `off-screen passes` shows how many were found. |
+| Black or 2D frames now and then | the log line `replay 3D x (relaxed y) / 2D z` counts them; if `2D` keeps growing try `mode = hybrid` (60 fps per eye) or `alternate` (half the fps per eye). |
+| Replay hangs at the start, stays 2D, or a game capped at 60 runs at 30 per eye | `mode = hybrid` in its profile. |
+| Shadows in the wrong place / different in each eye | keep `fix_shadows = auto` and `offscreen_mono = 1` (see "Shadows in Unreal Engine games"); compare with Ctrl+Shift+Pause. |
 | Unreal Engine game looks flat / eyes mixed (Air Twister...) | first check `world_scale` is 100 (log line `scale`). Then: |
 | Unreal Engine TAA | TAA mixes both eyes. In `Engine.ini` (`.../Saved/Config/Windows/` inside the Proton prefix) add `[SystemSettings]` `r.AntiAliasingMethod=1` (FXAA) and `r.DefaultFeature.AntiAliasing=1`. |
 | Game closes or hangs at the logo | send `~/.config/vrlinux/logs/<Game.exe>.log`; `DISABLE_VRLINUX=1` runs it without the layer to compare. |
@@ -149,7 +176,7 @@ Environment variables (highest priority): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`
 
 ## Testing without a headset
 
-`tests/monado-test.sh` runs everything with Monado's simulated headset and Mesa's software Vulkan (lavapipe) under Xvfb.
+`tests/monado-test.sh` runs everything with Monado's simulated headset and Mesa's software Vulkan (lavapipe) under Xvfb. `APP_DEPTH=1 VRLINUX_MODE=hybrid tests/monado-test.sh` tests the depth modes (the test scene gets a depth buffer).
 
 ---
 
@@ -227,6 +254,7 @@ Teclado (**Ctrl + Shift + …**; se pueden mantener pulsadas para cambiar valore
 | F9 | **guardar el perfil del juego** | guardar |
 | Insert | HUD fijo con el juego ⇄ HUD sigue a la cabeza | — |
 | Supr | límite de giro de cabeza: sin límite → 30° → 45° → 60° → 90° → sin límite | — |
+| Pausa | arreglo de sombras (`fix_shadows`) sí/no, para comparar | igual |
 | RePág / AvPág | HUD más cerca / más lejos | pantalla más cerca / más lejos |
 | Inicio | recentrar | recentrar |
 | Fin | movimiento de cabeza (6DOF) sí/no | — |
@@ -239,7 +267,7 @@ Teclado (**Ctrl + Shift + …**; se pueden mantener pulsadas para cambiar valore
 
 ### Girar la cámara con la cabeza (Ctrl+Shift+F11)
 
-La cámara del juego se reproyecta en los shaders a la orientación de tu cabeza, sumándose a lo que hagan el stick o el ratón. El juego solo dibuja lo que ve su propia cámara, así que si giras mucho la cabeza pueden faltar objetos o verse gráficos rotos en los bordes: sube el FOV del juego, o pon un límite con Ctrl+Shift+Supr (más allá la imagen deja de girar en vez de verse rota). El HUD (puntuación, marcadores) se queda fijo con el juego por defecto (`hud_follow = 0`); Ctrl+Shift+Insert hace que siga a tu cabeza. En juegos con render diferido la iluminación puede no seguir exactamente el giro.
+La cámara del juego se reproyecta en los shaders a la orientación de tu cabeza, sumándose a lo que hagan el stick o el ratón. El juego solo dibuja lo que ve su propia cámara, así que si giras mucho la cabeza pueden faltar objetos o verse gráficos rotos en los bordes: sube el FOV del juego, o pon un límite con Ctrl+Shift+Supr (más allá la imagen deja de girar en vez de verse rota). El HUD (puntuación, marcadores) se queda fijo con el juego por defecto (`hud_follow = 0`); Ctrl+Shift+Insert hace que siga a tu cabeza. En juegos con render diferido (Unreal Engine) las sombras y luces se recalculan para cada ojo con `fix_shadows` (ver abajo).
 
 ## Configuración
 
@@ -260,14 +288,39 @@ Opciones principales:
 | `fov` / `fov_axis` | `90` / `h` | FOV del juego (horizontal o vertical) |
 | `world_scale` | `1.0` (Unreal: `100`) | fuerza del 3D en inmersivo (unidades del juego por metro) |
 | `offscreen_mono` | `1` | los mapas de sombras y otras pasadas fuera de pantalla (cuadradas / 2:1) se dibujan sin el desplazamiento de cada ojo |
+| `fix_shadows` | `auto` | sombras / luces de Unreal Engine recalculadas para cada ojo (ver abajo); `0` desactivado |
 | `separation` / `convergence` | `0.015` / `1.5` | 3D del modo pantalla |
 | `screen_distance` / `screen_width` | `3.0` / `5.5` | distancia y tamaño de la pantalla (m) |
 | `render_size` | `auto` | resolución de los juegos Vulkan nativos (`auto`, `off`, `1832x2016`…) |
 | `mirror` | `0` | mostrar también el juego en la ventana del escritorio (puede dar tirones) |
-| `mode` | `replay` | `replay` los dos ojos en cada fotograma; `alternate` un fotograma por ojo |
+| `mode` | `replay` | `replay`, `hybrid`, `depth` o `alternate` (ver abajo) |
 | `flip_y` | `auto` | pon 1/0 si al mirar arriba el mundo se mueve al revés |
 
+### Modos (`mode`)
+
+| Modo | Cada fotograma del juego | fps por ojo (juego a 60) | Cuándo |
+|---|---|---|---|
+| `replay` (por defecto) | se dibuja dos veces, una por ojo | 60 | casi todos los juegos: 3D real en los dos ojos |
+| `hybrid` | se dibuja para un ojo (alternando); el **otro ojo se reconstruye con la profundidad de ese fotograma** | 60 | juegos en los que replay se cuelga, sale en 2D o va lento, y alternate da solo 30 por ojo |
+| `depth` | se dibuja una vez desde el centro de los ojos; **los dos ojos se reconstruyen** con la imagen y su profundidad | 60 | lo mismo, el que menos carga la GPU (un dibujado por fotograma) |
+| `alternate` | se dibuja para un ojo (alternando) | 30 | último recurso |
+
+- **hybrid** (de 3dvisionlinux): la mitad de las imágenes que ves son reales, dibujadas desde el ojo correcto; el fondo que se destapa junto a objetos cercanos en el ojo reconstruido sale de la última imagen real de ese ojo en vez de inventarse, así que hay muchos menos halos que en depth. Los menús y pantallas de carga sin escena 3D se ven como en alternate.
+- **depth**: el par entero sale de una imagen + su profundidad: pequeños halos donde se destapa el fondo junto a objetos cercanos, y el HUD toma la profundidad de lo que tiene detrás.
+- Los dos necesitan DXVK / VKD3D-Proton (dynamic rendering) y Vulkan 1.2; el registro avisa si un juego no es compatible. La capa encuentra sola el búfer de profundidad de la escena y aprende cómo se traduce su profundidad a distancia con muestras que guardan los shaders parcheados (el registro dice `projection of scene stage N found`; hasta entonces los ojos no se reconstruyen). Se manejan las escenas dibujadas en varias tandas que borran la profundidad (varias cámaras), la profundidad boca abajo (Unity) y las escenas con bandas negras.
+- En los dos modos los dos ojos comparten un mismo campo de visión (la unión de los dos del visor), así que un ojo se puede reconstruir desde el otro con desplazamientos horizontales; funciona con el giro de cabeza (`head_look`) y también en modo pantalla.
+- Los efectos que no escriben profundidad (láseres, humo, algunas partículas) pueden quedar mal colocados en el ojo reconstruido. `VRLINUX_DEPTH_SHOW=1` muestra la profundidad capturada en gris en los dos ojos (depuración).
+- Línea del registro: `hybrid: eyes rebuilt from depth N of M frames`.
+
 Variables de entorno (máxima prioridad): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`, `VRLINUX_LOOK`, `VRLINUX_FOV`, `VRLINUX_WORLD_SCALE`, `VRLINUX_SEP`, `VRLINUX_CONV`, `VRLINUX_RENDER_SIZE`, `VRLINUX_MIRROR`, `VRLINUX_MODE`, `VRLINUX_HIDE_EXT`, `VRLINUX_LOOK_LIMIT`, `VRLINUX_HUD_FOLLOW`, `VRLINUX_SCREEN_WIDTH`, `VRLINUX_SCREEN_DISTANCE`, `VRLINUX_LOG_LEVEL`, `VRLINUX_IGNORE=Launcher.exe`. Lanzador: `VRLINUX_RUNTIME=steamvr|wivrn|/ruta/runtime.json`.
+
+### Sombras en juegos Unreal Engine (`fix_shadows`, de 3dvisionlinux)
+
+Unreal Engine (EDF World Brothers 2, Tron Run, Moto Racer 4...) calcula las sombras, luces, niebla y oclusión ambiental después, en pasadas de pantalla completa que reconstruyen la posición 3D de cada píxel a partir de la profundidad con la matriz inversa de la cámara. Esa matriz no sabe nada de la transformación de cada ojo, así que cada ojo buscaba la sombra en el sitio equivocado. `fix_shadows` (por defecto `auto`) lo arregla mientras el juego carga sus shaders:
+
+- **Reconstrucciones en pantalla**: en los shaders de fragmentos y de cómputo la capa busca el patrón de la reconstrucción (`ScreenPos.x × SceneDepth` y `.y`, multiplicados después por una matriz) y lo cambia por la posición propia del juego para ese píxel: la transformación del ojo (posición del ojo, campo de visión del visor y giro de cabeza, o el desplazamiento del modo pantalla) se deshace de forma exacta cuando x e y se calculan juntas (lo normal), y exacta sin giro de cabeza cuando van por separado. Se hace antes de que el driver compile el shader: ningún fotograma sale mal y no cuesta nada durante la partida. El patrón es muy concreto, así que está activo en todos los juegos; el registro dice `fix_shadows: N shaders corrected`.
+- **Mapas de sombras**: Unreal los dibuja con profundidad de 16 bits y sin color, y el pre-pase de profundidad de la escena en 32 bits, así que esos pipelines no reciben la transformación del ojo (solo en juegos Unreal, `*-Shipping.exe`, o con `fix_shadows = 1`). `offscreen_mono` cubre los mapas de sombras de otros juegos por su forma.
+- Ctrl+Shift+Pausa desactiva y activa la corrección para comparar.
 
 ## Registros y problemas
 
@@ -281,8 +334,9 @@ Variables de entorno (máxima prioridad): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`
 | "Tarjeta gráfica no soportada" | prueba `VRLINUX_HIDE_EXT=0` (Azimuth ya lo lleva en su perfil incluido). |
 | Gráficos rotos al girar la cabeza | sube el FOV del juego o pon un límite con Ctrl+Shift+Supr; o apaga el giro (Ctrl+Shift+F11). |
 | El mundo se desplaza al girar la cabeza | el `fov` no coincide con el del juego: ajústalo con Ctrl+Shift+F1/F2. |
-| Fotogramas negros o en 2D de vez en cuando | la línea `replay 3D x (relaxed y) / 2D z` del registro los cuenta; si `2D` no para de subir prueba `mode = alternate` (la mitad de fps por ojo). |
-| Sombras mal colocadas / distintas en cada ojo | deja `offscreen_mono = 1`; la línea `off-screen passes` del registro dice cuántas se encontraron. |
+| Fotogramas negros o en 2D de vez en cuando | la línea `replay 3D x (relaxed y) / 2D z` del registro los cuenta; si `2D` no para de subir prueba `mode = hybrid` (60 fps por ojo) o `alternate` (la mitad de fps por ojo). |
+| Replay se cuelga al arrancar, sale en 2D, o un juego limitado a 60 va a 30 por ojo | `mode = hybrid` en su perfil. |
+| Sombras mal colocadas / distintas en cada ojo | deja `fix_shadows = auto` y `offscreen_mono = 1` (ver "Sombras en juegos Unreal Engine"); compara con Ctrl+Shift+Pausa. |
 | Juego Unreal Engine plano / ojos mezclados (Air Twister...) | primero comprueba que `world_scale` es 100 (línea `scale` del registro). Después: |
 | TAA de Unreal Engine | el TAA mezcla los dos ojos. En `Engine.ini` (`.../Saved/Config/Windows/` dentro del prefijo de Proton) añade `[SystemSettings]` `r.AntiAliasingMethod=1` (FXAA) y `r.DefaultFeature.AntiAliasing=1`. |
 | El juego se cierra o se cuelga en el logo | envía `~/.config/vrlinux/logs/<Juego.exe>.log`; `DISABLE_VRLINUX=1` lo arranca sin la capa para comparar. |
@@ -291,4 +345,4 @@ Variables de entorno (máxima prioridad): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`
 
 ## Probar sin visor
 
-`tests/monado-test.sh` lo ejecuta todo con el visor simulado de Monado y Vulkan por software de Mesa (lavapipe) en Xvfb.
+`tests/monado-test.sh` lo ejecuta todo con el visor simulado de Monado y Vulkan por software de Mesa (lavapipe) en Xvfb. `APP_DEPTH=1 VRLINUX_MODE=hybrid tests/monado-test.sh` prueba los modos de profundidad (la escena de prueba usa un búfer de profundidad).

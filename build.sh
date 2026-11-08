@@ -9,7 +9,7 @@ FLAGS="-std=c++17 -O2 ${DEBUGFLAGS:--g0} -Wall -Wno-missing-field-initializers -
 # -fno-exceptions: Wine ends threads blocked inside the layer with a forced unwind at exit; frames
 # with C++ exception tables would turn it into std::terminate (crash when closing the game)
 $CXX $FLAGS -fno-exceptions -fno-asynchronous-unwind-tables -funwind-tables -fPIC -shared -fvisibility=hidden \
-  src/layer.cpp src/spirv_patch.cpp src/config.cpp src/vrlink.cpp \
+  src/layer.cpp src/spirv_patch.cpp src/spirv_screenfix.cpp src/config.cpp src/vrlink.cpp \
   -o build/libvrlinux_layer.so.new \
   -static-libstdc++ -static-libgcc -Wl,--no-undefined -Wl,-z,defs -ldl -pthread
 mv -f build/libvrlinux_layer.so.new build/libvrlinux_layer.so
