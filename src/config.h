@@ -28,7 +28,12 @@ struct Config {
   float overscan = 1.05f;      // shader look: render a bit more than the headset FOV (for reprojection)
   int fixShadows = 2;          // screen-space position rebuilds corrected (Unreal shadows): 0 off, 1 on, 2 auto
   bool fixShadowsOn = true;    // runtime switch (Ctrl+Shift+Pause) to compare with / without
-  bool offscreenMono = true;   // passes whose shape differs from the game frame (shadow maps) get no eye transform
+  bool offscreenMono = true;
+  // ---- depth / hybrid modes
+  bool hudSeparation = false;  // rebuild the eyes from a copy of the scene taken before the HUD (experimental)
+  int hudSplit = 0;            // the copy is taken after this draw into the back buffer (0 = automatic)
+  bool flatMenus = false;      // hybrid: screens without a 3D scene (menus) drawn from the middle of the eyes
+  bool depthNearest = false;   // where several scene stages have depth, the nearest wins (else the latest)   // passes whose shape differs from the game frame (shadow maps) get no eye transform
   bool depthClamp = true;      // shader look: keep geometry beside/behind the game camera inside the depth range
   int renderW = -1, renderH = -1;  // size reported to native Vulkan games (-1 auto, 0 off)
   bool mirror = false;         // show the game on the desktop window too (can stall on some drivers)

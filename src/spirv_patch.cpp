@@ -142,6 +142,7 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
   size_t firstFunctionIdx = insts.size();
   size_t annotationEndIdx = insts.size();
   uint32_t idBool = 0, idU32 = 0, idU64 = 0, idF32 = 0;
+  bool vulkanMemModel = false;  // (DXVK) stores must be made available explicitly
 
   for (size_t ii = 0; ii < insts.size(); ++ii) {
     const Inst& in = insts[ii];
@@ -149,6 +150,7 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
     if (annotationEndIdx == insts.size() && !IsPreTypeSection(in.op)) annotationEndIdx = ii;
     switch (in.op) {
       case OpCapability: caps.insert(w[1]); break;
+      case OpMemoryModel: vulkanMemModel = in.wc >= 3 && w[2] == 3; break;
       case OpExtension: exts.insert(ReadString(w + 1, in.wc - 1)); break;
       case OpEntryPoint: {
         if (in.wc < 4) break;
@@ -251,11 +253,11 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
   // OpEmitVertex could break structured control flow)
   if (isGeometry) calib = false;
   uint32_t idPtrU64 = 0, idK63 = 0, idK6 = 0, idK3 = 0, idK32 = 0, idOff64 = 0, idK7 = 0, idK18 = 0, idK26 = 0,
-           idKMul = 0, idFlagOff = 0, idC0 = 0, idC1 = 0;
+           idKMul = 0, idFlagOff = 0, idC0 = 0, idC1 = 0, idHudOff = 0, idMHalf = 0, idQF = 0;
   if (calib) {
     idPtrU64 = fresh(); idK63 = fresh(); idK6 = fresh(); idK3 = fresh(); idK32 = fresh(); idOff64 = fresh();
     idK7 = fresh(); idK18 = fresh(); idK26 = fresh(); idKMul = fresh(); idFlagOff = fresh(); idC0 = fresh();
-    idC1 = fresh();
+    idC1 = fresh(); idHudOff = fresh(); idMHalf = fresh(); idQF = fresh();
   }
   int patchSites = 0;
 
@@ -320,6 +322,9 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
         Emit(out, OpConstant, {idU32, idKMul, 0x9E3779B1u});
         Emit(out, OpConstant, {idU32, idC0, 0});
         Emit(out, OpConstant, {idU32, idC1, 1});
+        Emit(out, OpConstant, {idU64, idHudOff, kHudParamsOffset, 0});
+        Emit(out, OpConstant, {floatType, idMHalf, 0xBF000000u});  // -0.5
+        Emit(out, OpConstant, {idU32, idQF, 5});                    // Scope QueueFamily
       }
     }
 
@@ -332,7 +337,22 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
       ++patchSites;
       const uint32_t F = floatType, B = idBool;
       uint32_t ptrS = fresh();
-      Emit(out, OpConvertUToPtr, {idPtrStruct, ptrS, idAddr});
+      uint32_t fl = 0;
+      if (calib) {
+        // flag < -0.5: the HUD drawn over the finished scene (depth / hybrid HUD separation) uses the
+        // parameters at kHudParamsOffset (the middle of the eyes): no disparity, the same in both eyes
+        uint32_t fa = fresh(), fp = fresh(), noShift = fresh(), hudA = fresh(), base = fresh();
+        fl = fresh();
+        Emit(out, OpIAdd, {idU64, fa, idAddr, idFlagOff});
+        Emit(out, OpConvertUToPtr, {idPtrFloat, fp, fa});
+        Emit(out, OpLoad, {F, fl, fp, MemAligned, 4});
+        Emit(out, OpFOrdLessThan, {B, noShift, fl, idMHalf});
+        Emit(out, OpIAdd, {idU64, hudA, idAddr, idHudOff});
+        Emit(out, OpSelect, {idU64, base, noShift, hudA, idAddr});
+        Emit(out, OpConvertUToPtr, {idPtrStruct, ptrS, base});
+      } else {
+        Emit(out, OpConvertUToPtr, {idPtrStruct, ptrS, idAddr});
+      }
       uint32_t m[kParamFloats];
       for (int i = 0; i < kParamFloats; ++i) {
         uint32_t pm = fresh();
@@ -425,13 +445,10 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
         // m = (bits(x) ^ (bits(y) >> 7) ^ bits(w) ^ (bits(z) >> 6)) * 0x9E3779B1
         // if (flag > 0.5 && w != 1 && (m >> 26) == 0)            (1 vertex in 64)
         //   slot[(flag - 1) * 64 + ((m >> 18) & 63)] = uint64(bits(w)) | (uint64(bits(z)) << 32)
-        uint32_t fa = fresh(), fp = fresh(), fl = fresh(), on = fresh(), wb = fresh(), xb = fresh(), yb = fresh(),
+        uint32_t on = fresh(), wb = fresh(), xb = fresh(), yb = fresh(),
                  zb = fresh(), zs = fresh(), ysh = fresh(), h1 = fresh(), h2 = fresh(), h3 = fresh(), hm = fresh(),
                  hh = fresh(), lo = fresh(), loz = fresh(), c1 = fresh(), cond = fresh(), lStore = fresh(),
                  lMerge = fresh();
-        Emit(out, OpIAdd, {idU64, fa, idAddr, idFlagOff});
-        Emit(out, OpConvertUToPtr, {idPtrFloat, fp, fa});
-        Emit(out, OpLoad, {F, fl, fp, MemAligned, 4});
         Emit(out, OpFOrdGreaterThan, {B, on, fl, idHalf});
         Emit(out, OpBitcast, {idU32, wb, wv});
         Emit(out, OpBitcast, {idU32, xb, x});
@@ -469,7 +486,10 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
         Emit(out, OpUConvert, {idU64, z64, zb});
         Emit(out, OpShiftLeftLogical, {idU64, zh, z64, idK32});
         Emit(out, OpBitwiseOr, {idU64, val, w64, zh});
-        Emit(out, OpStore, {ptr, val, MemAligned, 8});
+        if (vulkanMemModel)  // Aligned | MakePointerAvailable | NonPrivatePointer, scope QueueFamily
+          Emit(out, OpStore, {ptr, val, MemAligned | 0x8u | 0x20u, 8, idQF});
+        else
+          Emit(out, OpStore, {ptr, val, MemAligned, 8});
         Emit(out, OpBranch, {lMerge});
         Emit(out, OpLabel, {lMerge});
       }

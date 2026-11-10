@@ -1,0 +1,1093 @@
+diff --git a/README.md b/README.md
+index e53d283..4c4c67b 100644
+--- a/README.md
++++ b/README.md
+@@ -85,7 +85,7 @@ In-game settings: **1920x1080 fullscreen**, **no TAA/DLSS/FSR2+/frame generation
+ - **replay** (default): the game renders each frame once; the layer submits the same commands again with the other eye's camera. A game at 60 fps gives **60 fps per eye** with both eyes at the same instant. Twice the GPU work. If the game needs GPU results mid-frame, those frames are 2D and the layer falls back to alternate by itself.
+ - **alternate**: one game frame per eye; the game must run at 120 fps for 60 per eye.
+ - **depth**: for games that cannot use replay and are capped at 60 fps (alternate would give 30 per eye). The game renders one normal image per frame; the layer copies the scene's depth buffer right after the main pass and rebuilds **both eyes** from the image and the depth (60 fps per eye). It also learns how the game's depth maps to distance from samples stored by the patched shaders, so convergence works in the game's units as in the other modes. Limits: small halos where the background is uncovered next to near objects, and the HUD takes the depth of what is behind it. Needs DXVK / VKD3D-Proton (dynamic rendering); the log says when a game is not supported. Frames that draw no 3D scene (menus, loading screens) are shown in 2D instead of being warped by an old depth buffer. Scenes drawn in several stages that clear the depth (several cameras: EDF, Unity games) are combined pixel by pixel, each with its own projection; a depth buffer that is upside down (Unity) is detected by comparing its edges with the image, and a scene shown with black bars (16:10 or 4:3 in a 16:9 window) is placed between them.
+-- **hybrid**: alternate and depth together, for the same games (60 fps cap, no replay). Each game frame is rendered for one eye with the real stereo geometry, as in alternate, and the **other eye is rebuilt from that frame's depth**: 60 fps per eye. Half of the images shown are real, and the background uncovered next to near objects comes from the last real image of that eye (one frame old, seen from the right place) instead of being invented: far fewer halos than depth. Menus and loading screens without a 3D scene are shown exactly as in alternate. HUD separation (depth and hybrid, **experimental, off by default**: `hud_separation = 1` in the game's profile): DXVK / VKD3D games draw the finished scene into their back buffer and the HUD on top; the layer finds that image, copies it right after the scene arrived and rebuilds the eyes from the scene alone, with the HUD, crosshair, markers and menus on the screen plane (the log says `HUD separation: on`; it switches itself off in games that do not work that way). In games that record their frames on several threads (EDF 6) the copy can belong to another frame, which gives semi-transparent smudges with movement: leave it off there. Effects that do not write depth (lasers, smoke, some particles) can still be misplaced in the rebuilt eye. Same requirements as depth.
++- **hybrid**: alternate and depth together, for the same games (60 fps cap, no replay). Each game frame is rendered for one eye with the real stereo geometry, as in alternate, and the **other eye is rebuilt from that frame's depth**: 60 fps per eye. Half of the images shown are real, and the background uncovered next to near objects comes from the last real image of that eye (one frame old, seen from the right place) instead of being invented: far fewer halos than depth. Menus and loading screens without a 3D scene are shown exactly as in alternate. HUD separation (depth and hybrid, **experimental, off by default**: `hud_separation = 1` in the game's profile): DXVK / VKD3D games draw the finished scene into their back buffer and the HUD on top; the layer finds that image, copies it right after the scene arrived and rebuilds the eyes from the scene alone, with the HUD, crosshair, markers and menus on the screen plane (the log says `HUD separation: on`). The layer keeps the copies of the last 3 frames and, for each frame, uses the one that matches the image outside the HUD (games that record on several threads, such as EDF 6, present their frames in another order); a frame no copy matches is rebuilt without separation. Translucent HUD panels keep showing the scene through them at its depth. The HUD drawn after the copy is rendered without stereo shift in the real eyes too (games such as EDF 6 draw it with a perspective camera, which put it behind the screen with a different place in each eye), so both eyes see it in the same place. Scene stages: each clear of the scene depth starts a stage with its own projection, and so does going on in another depth image; a pass that goes back to the image of an earlier stage continues that stage (EDF 6 draws a far-away layer in a second depth image, with another camera, in the middle of the main scene). Where several stages have depth, the latest one wins; `depth_layers = nearest` (per game, EDF 6) takes the nearest instead, for far-away layers drawn after the main scene. `flat_menus = 1` (hybrid, per game): screens without a 3D scene (title, menus, loading) are drawn without stereo shift, for games whose 2D menus would otherwise sit far behind the screen (EDF 6). 8-bit and 10-bit back buffers (Unreal games), with or without MSAA. The copy is taken after the first draw into the back buffer (the finished scene); if the copies do not fit the frames, the layer tries after the 2nd, 3rd... draw by itself (log: `now trying the copy after back buffer draw N`), and switches the separation off for a while if none fits. **Ctrl+Shift+Scroll Lock** cycles off → automatic → copy after draw 1, 2 ... 6 → off, for games where the automatic choice is wrong (HUD still double: try the next one); Ctrl+Shift+F9 saves it in the profile (`hud_separation`, `hud_split`). Effects that do not write depth (lasers, smoke, some particles) can still be misplaced in the rebuilt eye. Same requirements as depth.
+ 
+ Replay starts after a **warm-up** of `replay_warmup` seconds (default 8) in alternate: intros, shader compilation and loading screens that would hang in replay get going first (`NV3D_REPLAY_WARMUP=0` disables it).
+ 
+@@ -102,9 +102,10 @@ Either way the display always gets left, right, left, right… at the monitor's
+ | F8 | 3D on/off |
+ | F9 | save this game's profile |
+ | F10 | test pattern on/off |
+-| F11 | capture: game image + left + right eye (PPM) |
++| F11 | capture: game image + left + right eye (PPM; the 5 previous ones are kept as `<game>_1_*` … `<game>_5_*`) |
+ | F12 | start / stop recording a 3D video (full SBS) |
+ | Pause | Unreal shadow corrections on/off (`fix_shadows`) |
++| Scroll Lock | depth / hybrid: HUD separation off → automatic → copy after draw 1 ... 6 (`hud_separation`, `hud_split`) |
+ | Insert / Delete | shutter delay +25 / −25 µs |
+ | End | shutter invert |
+ | PgUp / PgDn / Home | zoom in / out / reset |
+@@ -178,7 +179,7 @@ tools/3dvision-recorder  host side of the video recording (ffmpeg)
+ tools/3dvision-shader-scan  finds screen-space position rebuilds in dumped shaders (Unreal shadows)
+ tools/3dvision-run     launcher;  tools/set-120hz.sh  monitor mode
+ udev/                  udev rule (install-udev.sh)
+-tests/                 Vulkan test app (APP_DEPTH=1: 3D scene with depth, APP_MOVE=1, APP_STAGES=1/2: far/near cameras (2: the far one only every other second), APP_UNITY=1: upside-down 16:10 scene with bars, APP_DXVK=1: back buffer + HUD like DXVK, APP_MENU_AT=N), sync simulation
++tests/                 Vulkan test app (APP_DEPTH=1: 3D scene with depth, APP_MOVE=1, APP_STAGES=1/2: far/near cameras (2: the far one only every other second), APP_UNITY=1: upside-down 16:10 scene with bars, APP_DXVK=1/2/3: back buffer + HUD like DXVK (2: MSAA resolved in the pass, 3: MSAA drawn from secondary command buffers, as EDF 6), APP_BB10=1: 10-bit back buffer, APP_PANEL=1: translucent HUD panel, APP_PRE=1: first back buffer draw is not the scene, APP_STAGES=3: main scene, a layer with another camera in a second depth image, main scene again (like EDF 6), APP_MENU_AT=N), sync simulation
+ ```
+ 
+ License note: the emitter firmware belongs to NVIDIA and is never included; you extract it from your own copy of the driver.
+@@ -272,7 +273,7 @@ Ajustes del juego: **1920x1080 pantalla completa**, **sin TAA/DLSS/FSR2+/generac
+ - **replay** (por defecto): el juego dibuja cada fotograma una vez y la capa vuelve a enviar los mismos comandos con la cámara del otro ojo. Un juego a 60 fps da **60 fps por ojo** y los dos ojos ven el mismo instante. Doble trabajo para la GPU. Si el juego necesita resultados de la GPU a mitad de fotograma, esos fotogramas salen en 2D y la capa pasa sola a alternate.
+ - **alternate**: un fotograma del juego por ojo; el juego necesita 120 fps para 60 por ojo.
+ - **depth**: para juegos que no pueden usar replay y están limitados a 60 fps (en alternate darían 30 por ojo). El juego dibuja una imagen normal por fotograma; la capa copia el búfer de profundidad de la escena justo después del pase principal y reconstruye **los dos ojos** a partir de la imagen y la profundidad (60 fps por ojo). Aprende cómo se traduce la profundidad del juego a distancia con muestras que guardan los shaders parcheados, así que la convergencia va en las mismas unidades que en los otros modos. Límites: pequeños halos donde se destapa el fondo junto a objetos cercanos, y el HUD toma la profundidad de lo que tiene detrás. Necesita DXVK / VKD3D-Proton (dynamic rendering); el log avisa si un juego no es compatible. Los fotogramas sin escena 3D (menús, pantallas de carga) se ven en 2D en vez de deformarse con una profundidad antigua. Las escenas dibujadas en varias tandas que borran la profundidad (varias cámaras: EDF, juegos de Unity) se combinan píxel a píxel, cada una con su proyección; una profundidad boca abajo (Unity) se detecta comparando sus bordes con la imagen, y una escena mostrada con bandas negras (16:10 o 4:3 en una ventana 16:9) se coloca entre ellas.
+-- **hybrid**: alternate y depth a la vez, para los mismos juegos (limitados a 60 fps, sin replay). Cada fotograma del juego se dibuja para un ojo con la geometría estéreo real, como en alternate, y el **otro ojo se reconstruye con la profundidad de ese fotograma**: 60 fps por ojo. La mitad de las imágenes que ves son reales, y el fondo que se destapa junto a objetos cercanos sale de la última imagen real de ese ojo (de hace un fotograma y vista desde el sitio correcto) en vez de inventarse: muchos menos halos que en depth. Los menús y pantallas de carga sin escena 3D se ven exactamente como en alternate. Separación del HUD (depth e hybrid, **experimental, desactivada por defecto**: `hud_separation = 1` en el perfil del juego): los juegos con DXVK / VKD3D dibujan la escena terminada en su back buffer y el HUD encima; la capa encuentra esa imagen, la copia justo después de que llegue la escena y reconstruye los ojos solo con la escena, con el HUD, la mira, los marcadores y los menús en el plano de la pantalla (el registro dice `HUD separation: on`; se desactiva sola en los juegos que no funcionan así). En juegos que graban sus fotogramas en varios hilos (EDF 6) la copia puede ser de otro fotograma, lo que da manchas semitransparentes con el movimiento: ahí mejor dejarla desactivada. Los efectos que no escriben profundidad (láseres, humo, algunas partículas) pueden seguir mal colocados en el ojo reconstruido. Mismos requisitos que depth.
++- **hybrid**: alternate y depth a la vez, para los mismos juegos (limitados a 60 fps, sin replay). Cada fotograma del juego se dibuja para un ojo con la geometría estéreo real, como en alternate, y el **otro ojo se reconstruye con la profundidad de ese fotograma**: 60 fps por ojo. La mitad de las imágenes que ves son reales, y el fondo que se destapa junto a objetos cercanos sale de la última imagen real de ese ojo (de hace un fotograma y vista desde el sitio correcto) en vez de inventarse: muchos menos halos que en depth. Los menús y pantallas de carga sin escena 3D se ven exactamente como en alternate. Separación del HUD (depth e hybrid, **experimental, desactivada por defecto**: `hud_separation = 1` en el perfil del juego): los juegos con DXVK / VKD3D dibujan la escena terminada en su back buffer y el HUD encima; la capa encuentra esa imagen, la copia justo después de que llegue la escena y reconstruye los ojos solo con la escena, con el HUD, la mira, los marcadores y los menús en el plano de la pantalla (el registro dice `HUD separation: on`). La capa guarda las copias de los 3 últimos fotogramas y en cada fotograma usa la que coincide con la imagen fuera del HUD (los juegos que graban en varios hilos, como EDF 6, presentan sus fotogramas en otro orden); un fotograma sin copia que coincida se reconstruye sin separación. Los paneles translúcidos del HUD siguen dejando ver la escena a su profundidad. El HUD dibujado tras la copia se dibuja sin desplazamiento estéreo también en los ojos reales (juegos como EDF 6 lo dibujan con una cámara en perspectiva, que lo ponía detrás de la pantalla y en un sitio distinto en cada ojo), así que los dos ojos lo ven en el mismo sitio. Etapas de la escena: cada vez que se borra la profundidad de la escena empieza una etapa con su propia proyección, y también al seguir en otra imagen de profundidad; un pase que vuelve a la imagen de una etapa anterior continúa esa etapa (EDF 6 dibuja una capa lejana en una segunda imagen de profundidad, con otra cámara, en mitad de la escena principal). Donde varias etapas tienen profundidad gana la última; `depth_layers = nearest` (por juego, EDF 6) toma la más cercana, para capas lejanas dibujadas después de la escena principal. `flat_menus = 1` (hybrid, por juego): las pantallas sin escena 3D (título, menús, cargas) se dibujan sin desplazamiento estéreo, para juegos cuyos menús 2D quedarían muy por detrás de la pantalla (EDF 6). Back buffers de 8 y de 10 bits (juegos de Unreal), con o sin MSAA. La copia se toma tras el primer dibujo en el back buffer (la escena terminada); si las copias no encajan con los fotogramas, la capa prueba sola tras el 2º, 3º... dibujo (registro: `now trying the copy after back buffer draw N`), y desactiva la separación un rato si ninguno encaja. **Ctrl+Shift+Bloq Despl** pasa por desactivada → automática → copia tras el dibujo 1, 2 ... 6 → desactivada, para los juegos en que la elección automática falle (el HUD sigue doble: prueba el siguiente); Ctrl+Shift+F9 lo guarda en el perfil (`hud_separation`, `hud_split`). Los efectos que no escriben profundidad (láseres, humo, algunas partículas) pueden seguir mal colocados en el ojo reconstruido. Mismos requisitos que depth.
+ 
+ El modo replay empieza tras un **calentamiento** de `replay_warmup` segundos (8 por defecto) en alternate: las intros, la compilación de shaders y las pantallas de carga que se colgarían en replay arrancan primero (`NV3D_REPLAY_WARMUP=0` lo desactiva).
+ 
+@@ -289,9 +290,10 @@ En los dos casos la pantalla recibe siempre izquierdo, derecho, izquierdo, derec
+ | F8 | 3D sí/no |
+ | F9 | guardar el perfil del juego |
+ | F10 | patrón de prueba sí/no |
+-| F11 | captura: imagen del juego + ojo izquierdo + derecho (PPM) |
++| F11 | captura: imagen del juego + ojo izquierdo + derecho (PPM; se guardan las 5 anteriores como `<juego>_1_*` … `<juego>_5_*`) |
+ | F12 | empezar / parar la grabación de un vídeo 3D (SBS completo) |
+ | Pausa | correcciones de sombras de Unreal sí/no (`fix_shadows`) |
++| Bloq Despl | depth / hybrid: separación del HUD desactivada → automática → copia tras el dibujo 1 ... 6 (`hud_separation`, `hud_split`) |
+ | Insert / Supr | retardo del obturador +25 / −25 µs |
+ | Fin | invertir obturador |
+ | RePág / AvPág / Inicio | zoom más / menos / restablecer |
+@@ -365,7 +367,7 @@ tools/3dvision-recorder  parte del grabador de vídeo fuera del juego (ffmpeg)
+ tools/3dvision-shader-scan  busca en los shaders volcados las reconstrucciones de posición (sombras de Unreal)
+ tools/3dvision-run     lanzador;  tools/set-120hz.sh  modo del monitor
+ udev/                  regla udev (install-udev.sh)
+-tests/                 app de prueba Vulkan (APP_DEPTH=1: escena 3D con profundidad, APP_MOVE=1, APP_STAGES=1/2: cámara lejana/cercana (2: la lejana solo un segundo de cada dos), APP_UNITY=1: escena 16:10 boca abajo con bandas, APP_DXVK=1: back buffer + HUD como DXVK, APP_MENU_AT=N), simulación de la sincronización
++tests/                 app de prueba Vulkan (APP_DEPTH=1: escena 3D con profundidad, APP_MOVE=1, APP_STAGES=1/2: cámara lejana/cercana (2: la lejana solo un segundo de cada dos), APP_UNITY=1: escena 16:10 boca abajo con bandas, APP_DXVK=1/2/3: back buffer + HUD como DXVK (2: MSAA resuelto en la pasada, 3: MSAA dibujado desde búferes de comandos secundarios, como EDF 6), APP_BB10=1: back buffer de 10 bits, APP_PANEL=1: panel de HUD translúcido, APP_PRE=1: el primer dibujo en el back buffer no es la escena, APP_STAGES=3: escena principal, una capa con otra cámara en una segunda imagen de profundidad, escena principal otra vez (como EDF 6), APP_MENU_AT=N), simulación de la sincronización
+ ```
+ 
+ Nota de licencia: el firmware del emisor es de NVIDIA y nunca se incluye; lo extraes de tu propia copia del driver.
+diff --git a/default.conf.example b/default.conf.example
+index 2e8ed8d..52b0209 100644
+--- a/default.conf.example
++++ b/default.conf.example
+@@ -106,9 +106,20 @@ log_level = 1
+ # en juegos de Unreal (*-Shipping.exe) | 1 = siempre las dos cosas | 0 = nada. Ctrl+Shift+Pausa compara.
+ fix_shadows = auto
+ 
+-# depth / hybrid: HUD separation (experimental). The eyes are rebuilt from a copy of the scene taken
+-# before the HUD, so the HUD stays on the screen plane. 0 = off (default), 1 = on
++# depth / hybrid: separacion del HUD (experimental). Los ojos se reconstruyen con una copia de la escena
++# tomada antes del HUD, y el HUD queda en el plano de la pantalla. 0 = desactivada (por defecto), 1 = activada
+ hud_separation = 0
++# tras que dibujo en el back buffer se toma la copia: auto (empieza en 1 y prueba los siguientes) o 1..16.
++# Ctrl+Shift+Bloq Despl: desactivada -> auto -> 1 ... 6 -> desactivada
++hud_split = auto
++
++# hybrid: pantallas sin escena 3D (titulo, menus, cargas) sin desplazamiento estereo (1), para juegos cuyos
++# menus 2D quedan muy por detras de la pantalla (EDF 6). 0 = como el resto (por defecto)
++flat_menus = 0
++
++# depth / hybrid: donde varias etapas de la escena tienen profundidad gana la ultima (latest, por defecto)
++# o la mas cercana (nearest: capas lejanas dibujadas despues de la escena principal, EDF 6)
++depth_layers = latest
+ 
+ # Guardar todos los shaders del juego (SPIR-V) en ~/.cache/3dvision/shaders/<juego> para
+ # analizarlos (3dvision-tool shader-fix, 3dvision-shader-scan). Solo para diagnostico.
+diff --git a/src/config.cpp b/src/config.cpp
+index 0f11d85..f24a946 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -108,6 +108,12 @@ static void ApplyKey(const char* key, const char* val) {
+   else if (!strcmp(key, "skip_repeats") && ParseBool(val, b)) g_cfg.skipRepeats = b;
+   else if (!strcmp(key, "dump_shaders") && ParseBool(val, b)) g_cfg.dumpShaders = b;
+   else if (!strcmp(key, "hud_separation") && ParseBool(val, b)) g_cfg.hudSeparation = b;
++  else if (!strcmp(key, "flat_menus") && ParseBool(val, b)) g_cfg.flatMenus = b;
++  else if (!strcmp(key, "depth_layers")) g_cfg.depthNearest = !strcasecmp(val, "nearest");
++  else if (!strcmp(key, "hud_split")) {
++    if (!strcasecmp(val, "auto")) g_cfg.hudSplit = 0;
++    else if (ParseFloat(val, f)) g_cfg.hudSplit = std::clamp(int(f), 0, 16);
++  }
+   else if (!strcmp(key, "fix_shadows")) {
+     if (!strcasecmp(val, "auto")) g_cfg.fixShadows = 2;
+     else if (ParseBool(val, b)) g_cfg.fixShadows = b ? 1 : 0;
+@@ -183,7 +189,7 @@ static void LoadEnv() {
+                                 "hide_extensions", "patch_shaders", "log_level", "hotkeys", "emitter",
+                                 "emitter_delay_us", "emitter_invert", "emitter_button", "refresh",
+                                 "present_images", "test_pattern", "input", "skip_repeats", "shift_shadows", "hide_mesh_shaders", "record_width",
+-                                "record_height", "record_fps", "record", "replay_warmup", "dump_shaders", "fix_shadows", "hud_separation"};
++                                "record_height", "record_fps", "record", "replay_warmup", "dump_shaders", "fix_shadows", "hud_separation", "hud_split", "flat_menus", "depth_layers"};
+   for (const char* k : kKeys) {
+     std::string env = "NV3D_";
+     for (const char* c = k; *c; ++c) env += char(toupper(*c));
+@@ -268,6 +274,10 @@ void SaveConfig() {
+   fprintf(f, "skip_repeats = %d\nshift_shadows = %d\n", g_cfg.skipRepeats, g_cfg.shiftShadows);
+   fprintf(f, "fix_shadows = %s\n", g_cfg.fixShadows == 2 ? "auto" : g_cfg.fixShadows ? "1" : "0");
+   fprintf(f, "hud_separation = %d\n", g_cfg.hudSeparation ? 1 : 0);
++  if (g_cfg.hudSplit > 0) fprintf(f, "hud_split = %d\n", g_cfg.hudSplit);
++  else fprintf(f, "hud_split = auto\n");
++  fprintf(f, "flat_menus = %d\n", g_cfg.flatMenus ? 1 : 0);
++  fprintf(f, "depth_layers = %s\n", g_cfg.depthNearest ? "nearest" : "latest");
+   fclose(f);
+   struct stat st;
+   if (stat(g_profile.c_str(), &st) == 0) g_profileMtime = st.st_mtime;
+@@ -284,15 +294,16 @@ struct X11 {
+   unsigned char (*KeysymToKeycode)(void*, unsigned long) = nullptr;
+   bool tried = false;
+   bool ok = false;
+-  unsigned char kc[16] = {};
++  unsigned char kc[32] = {};  // (one per Key below)
+ };
+ X11 g_x;
+ 
+ enum Key { kCtrlL, kCtrlR, kShiftL, kShiftR, kF3, kF4, kF5, kF6, kF7, kF8, kF9, kF10, kF11,
+-           kPgUp, kPgDn, kHome, kF1, kF2, kIns, kDel, kEnd, kF12, kPause, kCount };
++           kPgUp, kPgDn, kHome, kF1, kF2, kIns, kDel, kEnd, kF12, kPause, kScroll, kCount };
++static_assert(kCount <= 32, "X11::kc holds 32 keys");
+ const unsigned long kSyms[kCount] = {0xFFE3, 0xFFE4, 0xFFE1, 0xFFE2, 0xFFC0, 0xFFC1, 0xFFC2, 0xFFC3,
+                                      0xFFC4, 0xFFC5, 0xFFC6, 0xFFC7, 0xFFC8, 0xFF55, 0xFF56, 0xFF50,
+-                                     0xFFBE, 0xFFBF, 0xFF63, 0xFFFF, 0xFF57, 0xFFC9, 0xFF13};
++                                     0xFFBE, 0xFFBF, 0xFF63, 0xFFFF, 0xFF57, 0xFFC9, 0xFF13, 0xFF14};
+ bool g_dumpRequested = false;
+ bool g_recordToggle = false;
+ 
+@@ -310,7 +321,8 @@ bool InitX11() {
+   for (int i = 0; i < kCount; ++i) g_x.kc[i] = g_x.KeysymToKeycode(g_x.dpy, kSyms[i]);
+   g_x.ok = true;
+   Log(1, "hotkeys: Ctrl+Shift + F3/F4 sep -/+  F5/F6 conv -/+  F7 swap eyes  F8 3D on/off  F9 save  F10 test pattern  "
+-         "F11 capture  F12 record video  Ins/Del shutter delay +/-  End shutter invert  PgUp/PgDn zoom  Home zoom=1  F1/F2 HUD depth  Pause shadow fix on/off");
++         "F11 capture  F12 record video  Ins/Del shutter delay +/-  End shutter invert  PgUp/PgDn zoom  Home zoom=1  F1/F2 HUD depth  Pause shadow fix on/off  "
++         "Scroll Lock HUD separation (off / auto / split 1-6)");
+   return true;
+ }
+ 
+@@ -412,6 +424,15 @@ bool PollControls() {
+     changed = true;
+     Log(1, "fix_shadows corrections %s", g_cfg.fixShadowsOn ? "ON" : "OFF");
+   }
++  if (pressed(kScroll)) {  // HUD separation: off -> automatic -> after draw 1, 2 ... 6 -> off
++    if (!g_cfg.hudSeparation) g_cfg.hudSeparation = true, g_cfg.hudSplit = 0;
++    else if (g_cfg.hudSplit < 6) ++g_cfg.hudSplit;
++    else g_cfg.hudSeparation = false, g_cfg.hudSplit = 0;
++    changed = true;
++    if (!g_cfg.hudSeparation) Log(1, "HUD separation: off");
++    else if (!g_cfg.hudSplit) Log(1, "HUD separation: on, automatic split point");
++    else Log(1, "HUD separation: on, copy after back buffer draw %d", g_cfg.hudSplit);
++  }
+   static bool wasAdjusting = false;
+   bool adjusting = mod && (cur[kF3] || cur[kF4] || cur[kF5] || cur[kF6] || cur[kPgUp] || cur[kPgDn] || cur[kF1] || cur[kF2]);
+   if (wasAdjusting && !adjusting)
+diff --git a/src/config.h b/src/config.h
+index dd6ee8c..0c87514 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -43,6 +43,9 @@ struct Config {
+   bool recordAtStart = false;  // start recording as soon as the game shows (NV3D_RECORD=1)
+   int inputLayout = 0;         // 0 game (render each eye), 1 SBS input (left/right halves), 2 top-bottom input
+   bool hudSeparation = false;  // depth/hybrid: rebuild the eyes from a copy of the scene taken before the HUD (experimental)
++  int hudSplit = 0;
++  bool flatMenus = false;
++  bool depthNearest = false;   // depth / hybrid: where several scene stages have depth, the nearest wins (else the latest)      // hybrid: screens without a 3D scene (menus) without stereo shift            // the copy is taken after this draw into the back buffer (0 = automatic)
+   bool dumpShaders = false;    // save every shader (SPIR-V) the game creates to ~/.cache/3dvision/shaders/<game>
+   int fixShadows = 2;          // screen-space position rebuilds corrected (Unreal shadows): 0 off, 1 on, 2 auto
+   bool fixShadowsOn = true;    // runtime switch (Ctrl+Shift+Pause) to compare with / without
+diff --git a/src/layer.cpp b/src/layer.cpp
+index fd425c9..c5cd3a5 100644
+--- a/src/layer.cpp
++++ b/src/layer.cpp
+@@ -294,7 +294,10 @@ struct DeviceData {
+   // projection samples are grouped by "stage" of the scene: how many times its depth was cleared
+   // in the frame. Some games draw the far scene with one camera, clear the depth and draw the near
+   // scene with another (EDF 6): only the last stage is in the depth copy, so only its camera counts.
+-  std::atomic<uint32_t> calibGroup{0};     // stage of the pass being recorded (reset every frame)
++  std::atomic<uint32_t> calibGroup{0};     // stages so far in the frame being recorded (reset every frame)
++  VkImage stageImg[4] = {};                // the depth image of each stage (caller holds depthLock)
++  uint32_t curStage = 0;                   // stage of the last scene pass (caller holds depthLock)
++  std::atomic<uint64_t> stageFrameAt{UINT64_MAX};  // (MAX: never)   // last frame whose start was seen in the passes
+   std::atomic<uint32_t> lastCopyGroup{0};  // stage of the last depth copy
+   std::atomic<uint32_t> copiedStages{0};   // stages whose depth was copied in the frame being recorded
+   uint64_t lastClassFrame = 0;
+@@ -319,7 +322,7 @@ struct DeviceData {
+   VkImage lastColorImg = VK_NULL_HANDLE;       // colour target of the last game-sized pass
+   VkImage bbCand = VK_NULL_HANDLE, bbImg = VK_NULL_HANDLE;
+   int bbVotes = 0;
+-  bool bbUsable = false, bbSwapRB = false;
++  bool bbUsable = false, bbSwapRB = false, bb10 = false;
+   // a multisampled back buffer is resolved into this image before the snapshot copy
+   VkImage bbResolve = VK_NULL_HANDLE;
+   VkDeviceMemory bbResolveMem = VK_NULL_HANDLE;
+@@ -331,8 +334,21 @@ struct DeviceData {
+   VkDeviceMemory snapMem = VK_NULL_HANDLE;
+   VkDeviceAddress snapAddr = 0;
+   VkDeviceSize snapSize = 0;
+-  std::atomic<bool> snapDone{false}, snapFrameOk{false}, bbFilled{false};
++  // HUD separation: kSnapSlots copies (the last frames'); the present picks the one of its frame
++  VkDeviceSize snapSlotBytes = 0;
++  std::atomic<uint32_t> snapNext{0};
++  std::atomic<uint64_t> slotFrame[3] = {{0}, {0}, {0}};
++  std::atomic<bool> snapDone{false}, bbFilled{false};
++  std::atomic<uint32_t> bbDraws{0};  // draws (and copies) into the back buffer in this frame so far
++  std::atomic<int64_t> lastSnapNs{0};
++  std::atomic<uint64_t> depthFrameAt{UINT64_MAX};  // (MAX: never)  // last frame the scene depth was cleared (HUD frame boundary)
++  std::atomic<uint32_t> snapTaken{0};  // copies taken since the last report
++  VkCommandBuffer lastBBcb = VK_NULL_HANDLE;
+   bool snapBad = false, loggedSnap = false;
++  // which draw into the back buffer ends the scene: the copy is taken after draw number 'split'.
++  // Automatic (hud_split = 0): starts at 1 and moves on while the copies do not fit the game image
++  uint32_t autoSplit = 1, lastSplit = 0, snapTried = 0, snapMatched = 0;
++  int lastHudCfg = -1;
+   std::atomic<int> traceFrames{0};  // Ctrl+Shift+F11 in depth / hybrid: log the passes of the next frame
+   uint64_t snapBadUntil = 0;
+   VkBuffer depthBuf = VK_NULL_HANDLE;       // raw depth copy, written inside the game's command buffers
+@@ -348,7 +364,7 @@ struct DeviceData {
+   std::atomic<uint32_t> depthCopies{0};
+   std::atomic<bool> loggedRenderPass{false};
+   VkPipelineLayout synthLayout = VK_NULL_HANDLE;
+-  VkPipeline synthPipe[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
++  VkPipeline synthPipe[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+   // projection of each scene stage (calibGroup): z_ndc = A + B / w
+   struct Proj {
+     float A = 0, B = 0;
+@@ -724,8 +740,11 @@ struct SynthPC {
+   uint32_t hyb;    // 1 = fill holes from prev
+   uint64_t stats;  // orientation test counters (host-visible, in the parameter buffer)
+   uint64_t snap;   // HUD separation: the game's back buffer before the HUD (W*H)
+-  uint32_t snapFlags;  // 1 = valid this frame, 2 = red / blue swapped compared with the game image
++  uint32_t snapFlags;  // 1 = copies available, 2 = red / blue swapped, 4 = 10-bit copies
++  uint32_t snapStride; // words between copies
++  uint32_t snapMask;   // slots holding a recent copy
+ };
++constexpr uint32_t kSnapSlots = 3;
+ constexpr uint32_t kStatsOffset = 3072;  // in the parameter buffer, after the projection samples
+ 
+ bool InitDepthMode(DeviceData* dd) {
+@@ -737,9 +756,9 @@ bool InitDepthMode(DeviceData* dd) {
+   plci.pushConstantRangeCount = 1;
+   plci.pPushConstantRanges = &pcr;
+   if (dd->d.CreatePipelineLayout(dd->device, &plci, nullptr, &dd->synthLayout) != VK_SUCCESS) return false;
+-  const uint32_t* code[2] = {kDepthSplatSpv, kDepthResolveSpv};
+-  const size_t size[2] = {sizeof(kDepthSplatSpv), sizeof(kDepthResolveSpv)};
+-  for (int i = 0; i < 2; ++i) {
++  const uint32_t* code[3] = {kDepthSplatSpv, kDepthResolveSpv, kDepthMatchSpv};
++  const size_t size[3] = {sizeof(kDepthSplatSpv), sizeof(kDepthResolveSpv), sizeof(kDepthMatchSpv)};
++  for (int i = 0; i < 3; ++i) {
+     VkShaderModuleCreateInfo smci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+     smci.codeSize = size[i];
+     smci.pCode = code[i];
+@@ -823,6 +842,7 @@ struct CbDepth {
+   VkExtent2D pExt{};
+   VkImageLayout pLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   uint32_t pMip = 0, pLayer = 0, pStage = 0;
++  uint32_t stage = 0;  // scene stage of the current pass
+   // the current pass draws into the game's back buffer (HUD separation)
+   bool bbPass = false, bbKhr = false, bbCanSplit = false, bbSecondary = false;
+   VkImage bbImg = VK_NULL_HANDLE;
+@@ -910,6 +930,9 @@ VKAPI_ATTR void VKAPI_CALL hook_DestroyImageView(VkDevice device, VkImageView vi
+   dd->d.DestroyImageView(device, view, a);
+ }
+ 
++inline uint64_t DepthClass(const CbDepth& st) {
++  return (uint64_t(st.ext.width) << 40) | (uint64_t(st.ext.height) << 20) | uint64_t(st.fmt & 0xFFFFF);
++}
+ void BeginRenderingCommon(TlsCb& t, const VkRenderingInfo* ri) {
+   CbDepth& st = *t.st;
+   DeviceData* dd = t.dd;
+@@ -943,6 +966,16 @@ void BeginRenderingCommon(TlsCb& t, const VkRenderingInfo* ri) {
+   st.mip = v->second.mip;
+   st.layer = v->second.layer;
+   st.active = true;
++  // The game clears its scene depth: a new frame begins (recorded in the game's order, unlike the
++  // present: DXVK records that on its own thread, often after the next frame's first draws). The
++  // HUD separation takes its next copy in this frame.
++  const uint64_t main = dd->mainClass.load();
++  if (st.clears && main && main == DepthClass(st)) dd->depthFrameAt = dd->frame;
++  if (st.clears && main && main == DepthClass(st) && dd->snapDone.load()) {
++    dd->snapDone = false;
++    dd->bbFilled = false;
++    dd->bbDraws = 0;
++  }
+ }
+ 
+ // right after a scene pass: copy its depth into the layer's buffer, inside the game's command buffer
+@@ -1034,9 +1067,18 @@ void SetCalibFlag(DeviceData* dd, VkCommandBuffer cb, float v) {
+                            nullptr, 0, nullptr);
+ }
+ 
+-inline uint64_t DepthClass(const CbDepth& st) {
+-  return (uint64_t(st.ext.width) << 40) | (uint64_t(st.ext.height) << 20) | uint64_t(st.fmt & 0xFFFFF);
++// params.flags = -2: the passes drawing the HUD over the copied scene (HUD separation) render without
++// stereo shift (the patched vertex shaders read it), so the HUD has no disparity in the real eyes
++// either: the rebuilt eye shows it where the real one does. (outside render passes)
++constexpr int kFlagNoShift = -2;
++void SetHudFlag(DeviceData* dd, VkCommandBuffer cb, CbDepth& st, bool on) {
++  if (!dd->paramBuf || !dd->canCalib) return;
++  const int want = on ? kFlagNoShift : 0;
++  if (st.flag == want || (!on && st.flag != kFlagNoShift)) return;
++  SetCalibFlag(dd, cb, float(want));
++  st.flag = want;
+ }
++
+ void EndRenderingCommon(TlsCb& t, VkCommandBuffer cb) {
+   CbDepth& st = *t.st;
+   if (!st.active || st.suspending) return;
+@@ -1062,7 +1104,7 @@ void EndRenderingCommon(TlsCb& t, VkCommandBuffer cb) {
+     st.pLayout = st.layout;
+     st.pMip = st.mip;
+     st.pLayer = st.layer;
+-    st.pStage = dd->calibGroup.load();
++    st.pStage = st.stage;
+   }
+ }
+ // called by the presenter side every few frames: the class with the most draws is the scene
+@@ -1094,6 +1136,11 @@ inline bool IsRGBA8(VkFormat f) {
+          f == VK_FORMAT_A8B8G8R8_SRGB_PACK32;
+ }
+ inline bool IsBGRA8(VkFormat f) { return f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB; }
++inline bool Is10Bit(VkFormat f) {
++  return f == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || f == VK_FORMAT_A2R10G10B10_UNORM_PACK32;
++}
++// red in the lowest bits of the 32-bit pixel
++inline bool LowIsRed(VkFormat f) { return IsRGBA8(f) || f == VK_FORMAT_A2B10G10R10_UNORM_PACK32; }
+ // a format a back buffer can have (what is shown); HDR scene targets (16-bit float, B10G11R11) are not
+ inline bool IsDisplayFormat(VkFormat f) {
+   return IsRGBA8(f) || IsBGRA8(f) || f == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || f == VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+@@ -1112,7 +1159,8 @@ void VoteBackbufferLocked(DeviceData* dd, VkImage cand) {
+   auto it = dd->colorImgs.find(cand);
+   if (it == dd->colorImgs.end()) { dd->bbUsable = false; return; }
+   const DeviceData::ColorImg& ci = it->second;
+-  bool fmtOk = ((IsRGBA8(ci.fmt) || IsBGRA8(ci.fmt)) && (IsRGBA8(dd->scFormat) || IsBGRA8(dd->scFormat))) ||
++  // (8-bit copies, or 10-bit ones turned into 8 bits by the shader, against an 8-bit presented image)
++  bool fmtOk = (IsDisplayFormat(ci.fmt) && (IsRGBA8(dd->scFormat) || IsBGRA8(dd->scFormat))) ||
+                (ci.fmt == dd->scFormat && IsDisplayFormat(ci.fmt));
+   bool extOk = ci.ext.width == dd->gameExt.width && ci.ext.height == dd->gameExt.height;
+   dd->bbSamples = ci.samples;
+@@ -1140,12 +1188,14 @@ void VoteBackbufferLocked(DeviceData* dd, VkImage cand) {
+     }
+   }
+   bool resolveOk = ci.samples == 1 || dd->bbResolve;
+-  dd->bbUsable = Cfg().hudSeparation && fmtOk && extOk && resolveOk && dd->snapBuf;
+-  dd->bbSwapRB = fmtOk && IsRGBA8(ci.fmt) != IsRGBA8(dd->scFormat);
++  dd->bbUsable = fmtOk && extOk && resolveOk && dd->snapBuf;
++  dd->bb10 = Is10Bit(ci.fmt) && !Is10Bit(dd->scFormat);
++  dd->bbSwapRB = fmtOk && LowIsRed(ci.fmt) != LowIsRed(dd->scFormat);
+   Log(1, "HUD separation: the game's back buffer is a %ux%u image (format %d, %u samples)%s", ci.ext.width,
+       ci.ext.height, int(ci.fmt), ci.samples,
+-      dd->bbUsable ? "" : !Cfg().hudSeparation ? " (hud_separation = 0: not used)" : !fmtOk ? ": format not supported" : !extOk ? ": another size than the game image, not used"
+-                                                             : ": could not make its resolve image, not used");
++      !dd->bbUsable ? (!fmtOk ? ": format not supported" : !extOk ? ": another size than the game image, not used"
++                                                             : ": could not make its resolve image, not used")
++      : !Cfg().hudSeparation ? " (hud_separation = 0: not used)" : "");
+ }
+ 
+ // copies the back buffer (= the scene without HUD) into snapBuf, outside any render pass
+@@ -1154,15 +1204,27 @@ void RecordSnapshot(DeviceData* dd, VkCommandBuffer cb, VkImage img, VkImageLayo
+   VkExtent2D ext;
+   VkImage rimg;
+   uint32_t samples;
++  VkDeviceSize slotBytes;
+   {
+     std::lock_guard<std::mutex> l(dd->depthLock);
+     dst = dd->snapBuf;
+     ext = dd->gameExt;
+     rimg = dd->bbResolve;
+     samples = dd->bbSamples;
++    slotBytes = dd->snapSlotBytes;
+   }
+-  if (!dst || layout == VK_IMAGE_LAYOUT_UNDEFINED || (samples > 1 && !rimg) || dd->snapDone.exchange(true)) return;
+-  if (dd->traceFrames.load() > 0) Log(1, "  -> scene snapshot (HUD separation)%s", samples > 1 ? ", resolved" : "");
++  if (!dst || !slotBytes || layout == VK_IMAGE_LAYOUT_UNDEFINED || (samples > 1 && !rimg) ||
++      dd->snapDone.exchange(true))
++    return;
++  const uint32_t slot = dd->snapNext.fetch_add(1) % kSnapSlots;
++  ++dd->snapTaken;
++  dd->lastSnapNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
++                       std::chrono::steady_clock::now().time_since_epoch()).count();
++  dd->slotFrame[slot] = dd->frame + 1;  // (+1: 0 = never written)
++  const VkDeviceSize dstOff = slot * slotBytes;
++  if (dd->traceFrames.load() > 0)
++    Log(1, "  -> scene copy %u for the HUD separation, after back buffer draw %u%s", slot, dd->bbDraws.load(),
++        samples > 1 ? " (resolved)" : "");
+   if (samples > 1) {  // multisampled: resolve into the layer's image, then copy that one
+     VkImageMemoryBarrier bs[2] = {{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}, {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER}};
+     const VkImageLayout sl = layout == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+@@ -1202,6 +1264,7 @@ void RecordSnapshot(DeviceData* dd, VkCommandBuffer cb, VkImage img, VkImageLayo
+                              VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
+                              nullptr, 2, bs);
+     VkBufferImageCopy r{};
++    r.bufferOffset = dstOff;
+     r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+     r.imageExtent = {ext.width, ext.height, 1};
+     dd->d.CmdCopyImageToBuffer(cb, rimg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, 1, &r);
+@@ -1209,7 +1272,6 @@ void RecordSnapshot(DeviceData* dd, VkCommandBuffer cb, VkImage img, VkImageLayo
+     mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+     dd->d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
+                              nullptr, 0, nullptr);
+-    dd->snapFrameOk = true;
+     return;
+   }
+   const VkImageLayout cl = layout == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+@@ -1228,6 +1290,7 @@ void RecordSnapshot(DeviceData* dd, VkCommandBuffer cb, VkImage img, VkImageLayo
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 1, &ib);
+   VkBufferImageCopy r{};
++  r.bufferOffset = dstOff;
+   r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+   r.imageExtent = {ext.width, ext.height, 1};
+   dd->d.CmdCopyImageToBuffer(cb, img, cl, dst, 1, &r);
+@@ -1240,8 +1303,10 @@ void RecordSnapshot(DeviceData* dd, VkCommandBuffer cb, VkImage img, VkImageLayo
+   mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+   dd->d.CmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0,
+                            nullptr, 1, &ib);
+-  dd->snapFrameOk = true;
+ }
++// the copy is taken once 'split' draws went into the back buffer this frame
++uint32_t SplitDraw(DeviceData* dd) { return Cfg().hudSplit > 0 ? uint32_t(Cfg().hudSplit) : dd->autoSplit; }
++inline bool SnapDue(DeviceData* dd) { return !dd->snapDone.load() && dd->bbDraws.load() >= SplitDraw(dd); }
+ 
+ // before the game's pass begins: does it draw into the presented image (then the last game-sized
+ // target is the back buffer candidate) or into the back buffer?
+@@ -1265,9 +1330,12 @@ void NoteColorPass(TlsCb& t, VkCommandBuffer cb, const VkRenderingInfo* ri, bool
+     img = v->second;
+     if (dd->presentedImgs.count(img)) {
+       VoteBackbufferLocked(dd, dd->lastColorImg);
+-      // the game's frame is finished (recording order: games that record on several threads present late)
+-      dd->snapDone = false;
+-      dd->bbFilled = false;
++      // the game's frame is finished (when there is no scene depth to tell: menus, 2D games)
++      if (dd->depthFrameAt.load() == UINT64_MAX || dd->frame > dd->depthFrameAt.load() + 10) {
++        dd->snapDone = false;
++        dd->bbFilled = false;
++        dd->bbDraws = 0;
++      }
+       return;
+     }
+     // (only targets in a display format: the game may already be drawing the next frame's HDR scene
+@@ -1276,7 +1344,7 @@ void NoteColorPass(TlsCb& t, VkCommandBuffer cb, const VkRenderingInfo* ri, bool
+     if (c != dd->colorImgs.end() && c->second.ext.width == dd->gameExt.width &&
+         c->second.ext.height == dd->gameExt.height && IsDisplayFormat(c->second.fmt))
+       dd->lastColorImg = img;
+-    isBB = img == dd->bbImg && dd->bbUsable && !dd->snapBad;
++    isBB = img == dd->bbImg && dd->bbUsable && !dd->snapBad && Cfg().hudSeparation;
+   }
+   if (!isBB) return;
+   st.bbPass = true;
+@@ -1303,26 +1371,34 @@ void NoteColorPass(TlsCb& t, VkCommandBuffer cb, const VkRenderingInfo* ri, bool
+     st.bbStencil.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+     st.bbInfo.pStencilAttachment = &st.bbStencil;
+   }
+-  // the scene came in by a copy (CopyResource, a blit) and this pass only adds the HUD: copy now
+-  if (!dd->snapDone.load() && dd->bbFilled.load() && ca.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD)
+-    RecordSnapshot(dd, cb, img, ca.imageLayout);
++  // enough of the frame is already in the back buffer (earlier passes, or the scene came in by a copy:
++  // CopyResource, a blit) and this pass adds to it: copy now
++  if (SnapDue(dd) && ca.loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) RecordSnapshot(dd, cb, img, ca.imageLayout);
++  if (dd->snapDone.load()) SetHudFlag(dd, cb, st, true);  // this pass draws HUD only
+ }
+ 
+ // before a draw: the back buffer pass already has its first draw (the finished scene): copy it now,
+ // before the HUD, by ending the pass and continuing it
+ void BeforeDraw(TlsCb& t, VkCommandBuffer cb) {
+   CbDepth& st = *t.st;
+-  if (!st.bbPass || !st.bbCanSplit || st.bbSecondary || st.draws < 1 || t.dd->snapDone.load()) return;
++  if (!st.bbPass || st.bbSecondary) return;
+   DeviceData* dd = t.dd;
++  if (!st.bbCanSplit || !SnapDue(dd)) {
++    ++dd->bbDraws;
++    return;
++  }
+   (st.bbKhr && dd->d.CmdEndRenderingKHR ? dd->d.CmdEndRenderingKHR : dd->d.CmdEndRendering)(cb);
+   RecordSnapshot(dd, cb, st.bbImg, st.bbLayout);
++  SetHudFlag(dd, cb, st, true);
+   (st.bbKhr && dd->d.CmdBeginRenderingKHR ? dd->d.CmdBeginRenderingKHR : dd->d.CmdBeginRendering)(cb, &st.bbInfo);
++  ++dd->bbDraws;
+ }
+ void AfterColorPass(TlsCb& t, VkCommandBuffer cb) {
+   CbDepth& st = *t.st;
+   if (!st.bbPass) return;
+   st.bbPass = false;
+-  if (st.bbCanSplit && st.draws >= 1 && !t.dd->snapDone.load()) RecordSnapshot(t.dd, cb, st.bbImg, st.bbLayout);
++  SetHudFlag(t.dd, cb, st, false);  // (after the pass: the next passes are the game's again)
++  if (st.bbCanSplit && SnapDue(t.dd)) RecordSnapshot(t.dd, cb, st.bbImg, st.bbLayout);
+ }
+ // the pass's draws are in secondary command buffers (D3D11 games on DXVK may record them on worker
+ // threads): the first one with draws is the scene; the pass is split after it, as after a first draw
+@@ -1343,21 +1419,22 @@ VKAPI_ATTR void VKAPI_CALL hook_CmdExecuteCommands(VkCommandBuffer cb, uint32_t
+     for (uint32_t i = 0; i < n; ++i) line += " " + std::to_string(draws[i]);
+     Log(1, "%s", line.c_str());
+   }
+-  uint32_t done = 0;
+-  if (st->bbPass && st->bbSecondary && st->bbCanSplit && !dd->snapDone.load()) {
+-    for (uint32_t i = 0; i < n; ++i) {
+-      if (!draws[i]) continue;
+-      dd->d.CmdExecuteCommands(cb, i + 1, cbs);
+-      for (uint32_t k = 0; k <= i; ++k) st->draws += draws[k];
+-      done = i + 1;
++  // the copy is taken between two of them, once 'split' draws went in (it cannot be inside one)
++  uint32_t start = 0;
++  for (uint32_t i = 0; i < n; ++i) {
++    st->draws += draws[i];
++    if (!st->bbPass || !st->bbSecondary) continue;
++    if (st->bbCanSplit && draws[i] && SnapDue(dd)) {
++      if (i > start) dd->d.CmdExecuteCommands(cb, i - start, cbs + start);
++      start = i;
+       (st->bbKhr && dd->d.CmdEndRenderingKHR ? dd->d.CmdEndRenderingKHR : dd->d.CmdEndRendering)(cb);
+       RecordSnapshot(dd, cb, st->bbImg, st->bbLayout);
++      SetHudFlag(dd, cb, *st, true);
+       (st->bbKhr && dd->d.CmdBeginRenderingKHR ? dd->d.CmdBeginRenderingKHR : dd->d.CmdBeginRendering)(cb, &st->bbInfo);
+-      break;
+     }
++    dd->bbDraws += draws[i];
+   }
+-  for (uint32_t k = done; k < n; ++k) st->draws += draws[k];
+-  if (done < n) dd->d.CmdExecuteCommands(cb, n - done, cbs + done);
++  if (start < n) dd->d.CmdExecuteCommands(cb, n - start, cbs + start);
+ }
+ void NoteTransfer(DeviceData* dd, VkImage src, VkImage dst) {
+   if (!dd->depthMode) return;
+@@ -1366,10 +1443,16 @@ void NoteTransfer(DeviceData* dd, VkImage src, VkImage dst) {
+     Log(1, "  transfer %p -> %p%s", (void*)src, (void*)dst, dd->presentedImgs.count(dst) ? " (PRESENTED)" : "");
+   if (dd->presentedImgs.count(dst)) {
+     VoteBackbufferLocked(dd, src);
+-    dd->snapDone = false;
+-    dd->bbFilled = false;
++    if (dd->depthFrameAt.load() == UINT64_MAX || dd->frame > dd->depthFrameAt.load() + 10) {
++      dd->snapDone = false;
++      dd->bbFilled = false;
++      dd->bbDraws = 0;
++    }
++  }
++  if (dst && dst == dd->bbImg) {  // a copy into the back buffer counts as a draw
++    dd->bbFilled = true;
++    ++dd->bbDraws;
+   }
+-  if (dst && dst == dd->bbImg) dd->bbFilled = true;
+ }
+ VKAPI_ATTR void VKAPI_CALL hook_CmdCopyImage(VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst,
+                                              VkImageLayout dl, uint32_t n, const VkImageCopy* r) {
+@@ -1467,7 +1550,7 @@ void TracePass(TlsCb& t, VkCommandBuffer cb, const VkRenderingInfo* ri) {
+     line += " [" + DescribeImage(dd, ri->pDepthAttachment->imageView, true) + " load " +
+             std::to_string(int(ri->pDepthAttachment->loadOp)) + " layout " +
+             std::to_string(int(ri->pDepthAttachment->imageLayout)) + "]";
+-  if (t.st->active) line += " SCENE-DEPTH stage " + std::to_string(dd->calibGroup.load());
++  if (t.st->active) line += " SCENE-DEPTH stage " + std::to_string(t.st->stage);
+   Log(1, "%s", line.c_str());
+ }
+ void TraceEnd(TlsCb& t) {
+@@ -1494,8 +1577,41 @@ void CalibBeforePass(TlsCb& t, VkCommandBuffer cb, const VkRenderingInfo* ri) {
+   int want;
+   const uint64_t main = dd->mainClass.load();
+   if (st.active && (main == 0 || main == DepthClass(st))) {
+-    uint32_t g = dd->calibGroup.load();
+-    if (st.clears && g < 3) dd->calibGroup = ++g;
++    // A new stage each time the scene depth is cleared (another camera), or when the scene goes on in
++    // another depth image. A pass that goes back to an image of an earlier stage without clearing it
++    // continues that stage (EDF 6: the main scene, a far-away layer in another image with its own
++    // projection, then more of the main scene): its samples and its depth belong to that camera.
++    uint32_t g;
++    {
++      std::lock_guard<std::mutex> l(dd->depthLock);
++      g = dd->calibGroup.load();
++      // The first stage's image cleared again after the frame went on to later stages and came back:
++      // the next frame begins (seen in the game's recording order; the present is recorded on
++      // another thread and can come late, in the middle of the next frame's stages)
++      if (st.clears && g > dd->curStage && dd->stageImg[1] == st.img) {
++        dd->calibGroup = g = 0;
++        for (auto& im : dd->stageImg) im = VK_NULL_HANDLE;
++        dd->stageFrameAt = dd->frame;
++      }
++      if (!dd->stageImg[g]) dd->stageImg[g] = st.img;
++      if (st.clears || dd->stageImg[g] != st.img) {
++        int back = -1;
++        if (!st.clears)
++          for (int s = int(g); s >= 0; --s)
++            if (dd->stageImg[s] == st.img) { back = s; break; }
++        if (back >= 0) {
++          g = uint32_t(back);
++        } else if (g < 3) {
++          dd->calibGroup = ++g;
++          dd->stageImg[g] = st.img;
++        }
++      }
++    }
++    st.stage = g;
++    {
++      std::lock_guard<std::mutex> l(dd->depthLock);
++      dd->curStage = g;
++    }
+     want = int(1 + g);
+   } else if (ri->pDepthAttachment && ri->pDepthAttachment->imageView) {
+     want = 0;
+@@ -3492,9 +3608,9 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_CreateSwapchainKHR(VkDevice device, const Vk
+     VkBuffer nb = VK_NULL_HANDLE;
+     VkDeviceMemory nm = VK_NULL_HANDLE;
+     VkDeviceAddress na = 0;
+-    bool grow = dd->snapSize < snapNeed;
+-    if (grow && !CreateDevBuf(dd, snapNeed, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+-                              &nb, &nm, &na))
++    bool grow = dd->snapSize < snapNeed * kSnapSlots;
++    if (grow && !CreateDevBuf(dd, snapNeed * kSnapSlots,
++                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &nb, &nm, &na))
+       grow = false;
+     std::lock_guard<std::mutex> l(dd->depthLock);
+     dd->gameExt = sc->vext;
+@@ -3504,8 +3620,10 @@ VKAPI_ATTR VkResult VKAPI_CALL hook_CreateSwapchainKHR(VkDevice device, const Vk
+       dd->snapBuf = nb;
+       dd->snapMem = nm;
+       dd->snapAddr = na;
+-      dd->snapSize = snapNeed;
++      dd->snapSize = snapNeed * kSnapSlots;
+     }
++    dd->snapSlotBytes = dd->snapSize >= snapNeed * kSnapSlots ? snapNeed : 0;
++    for (auto& f : dd->slotFrame) f = 0;
+     dd->bbImg = dd->bbCand = dd->lastColorImg = VK_NULL_HANDLE;  // learnt again for this swapchain
+     dd->bbUsable = false;
+     dd->bbVotes = 0;
+@@ -3815,6 +3933,13 @@ void FinishCapture(DeviceData* dd, Swapchain* sc, Capture& c, VkFence wait, uint
+   if (!c.on) return;
+   dd->d.WaitForFences(dd->device, 1, &wait, VK_TRUE, UINT64_MAX);
+   std::string base = DumpDir() + "/" + GameName();
++  // the earlier captures are kept: <game>_1_* is the previous one ... <game>_5_* the oldest
++  static const char* kParts[] = {"_game.ppm", "_left.ppm", "_right.ppm", "_info.txt"};
++  for (int i = 4; i >= 0; --i)
++    for (const char* part : kParts) {
++      const std::string from = i ? base + "_" + std::to_string(i) + part : base + part;
++      rename(from.c_str(), (base + "_" + std::to_string(i + 1) + part).c_str());
++    }
+   bool ok = WritePPM(dd, c.game, sc->format, sc->vext, base + "_game.ppm") &&
+             WritePPM(dd, c.eye[0], sc->realFormat, sc->rext, base + "_left.ppm") &&
+             WritePPM(dd, c.eye[1], sc->realFormat, sc->rext, base + "_right.ppm");
+@@ -4415,9 +4540,18 @@ VkResult PresentDepth(DeviceData* dd, VkQueue queue, Swapchain* sc, uint32_t idx
+     dd->traceFrames = 2;
+     Log(1, "---- pass trace of the next frame (Ctrl+Shift+F11):");
+   }
+-  dd->calibGroup = 0;  // the next frame's scene stages count from 0
++  if (dd->traceFrames.load() > 0 && dd->paramMap) {
++    volatile uint32_t* st = (volatile uint32_t*)((char*)dd->paramMap + kStatsOffset);
++    Log(1, "  HUD separation, last frame: %u samples, equal to copy 0/1/2: %u %u %u, copy equal to an earlier "
++           "frame: %u %u %u", st[11], st[8], st[9], st[10], st[12], st[13], st[14]);
++  }
++  const uint64_t sfa = dd->stageFrameAt.load();
++  if (sfa == UINT64_MAX || frame > sfa + 10) {  // (unless the passes tell where frames begin)
++    dd->calibGroup = 0;  // the next frame's scene stages count from 0
++    std::lock_guard<std::mutex> l(dd->depthLock);
++    for (auto& im : dd->stageImg) im = VK_NULL_HANDLE;
++  }
+   const uint32_t copied = dd->copiedStages.exchange(0);
+-  const bool snapOk = dd->snapFrameOk.exchange(false);  // the scene without HUD was copied this frame
+ 
+   dd->stage = "present(depth): waiting for previous copy";
+   dd->d.WaitForFences(dd->device, 1, &vi.fence, VK_TRUE, UINT64_MAX);
+@@ -4463,18 +4597,36 @@ VkResult PresentDepth(DeviceData* dd, VkQueue queue, Swapchain* sc, uint32_t idx
+     pc.stats = dd->paramAddr + kStatsOffset;
+     {
+       std::lock_guard<std::mutex> l(dd->depthLock);
++      // the setting changed (profile, Ctrl+Shift+Scroll Lock): learn again
++      const int hudCfg = (Cfg().hudSeparation ? 1 : 0) | (Cfg().hudSplit << 1);
++      if (hudCfg != dd->lastHudCfg) {
++        dd->lastHudCfg = hudCfg;
++        dd->snapBad = false;
++        dd->loggedSnap = false;
++        dd->autoSplit = 1;
++        dd->snapTried = dd->snapMatched = 0;
++      }
+       if (dd->snapBad && frame >= dd->snapBadUntil) dd->snapBad = false;  // try again now and then
+       pc.snap = dd->snapAddr;
+-      pc.snapFlags = (snapOk && dd->bbUsable && !dd->snapBad ? 1u : 0u) | (dd->bbSwapRB ? 2u : 0u);
+-      if ((pc.snapFlags & 1u) && !dd->loggedSnap) {
++      // the copies of the last few frames: the shader uses the one that matches this image
++      for (uint32_t k = 0; k < kSnapSlots; ++k) {
++        const uint64_t f = dd->slotFrame[k].load();
++        if (f && f + 6 >= frame + 1) pc.snapMask |= 1u << k;
++      }
++      pc.snapStride = uint32_t(dd->snapSlotBytes / 4);
++      const bool use = Cfg().hudSeparation && dd->bbUsable && !dd->snapBad && pc.snapMask &&
++                       dd->snapSlotBytes == VkDeviceSize(W) * H * 4;
++      pc.snapFlags = (use ? 1u : 0u) | (dd->bbSwapRB ? 2u : 0u) | (dd->bb10 ? 4u : 0u);
++      if (use && !dd->loggedSnap) {
+         dd->loggedSnap = true;
+-        Log(1, "HUD separation: on (scene copied before the HUD; the HUD stays on the screen plane)");
++        Log(1, "HUD separation: on (scene copied after back buffer draw %u, before the HUD; the HUD stays on the "
++               "screen plane)", SplitDraw(dd));
+       }
+     }
+     pc.W = W;
+     pc.H = H;
+     // the stages copied in this frame that have a known projection: the shader combines them
+-    uint32_t stages = copied, metaTail[11] = {};
++    uint32_t stages = copied, metaTail[12] = {};
+     VkDeviceSize strideBytes;
+     {
+       std::lock_guard<std::mutex> l(dd->depthLock);
+@@ -4492,18 +4644,43 @@ VkResult PresentDepth(DeviceData* dd, VkQueue queue, Swapchain* sc, uint32_t idx
+     if (dd->paramMap && frame >= dd->lastFlipCheck + 30) {
+       dd->lastFlipCheck = frame;
+       volatile uint32_t* st = (volatile uint32_t*)((char*)dd->paramMap + kStatsOffset);
+-      uint32_t eA = st[0], hA = st[1], eB = st[2], hB = st[3], sTot = st[4], sHud = st[5];
+-      st[0] = st[1] = st[2] = st[3] = st[4] = st[5] = 0;
+-      // HUD separation sanity: the "HUD" (what changed after the copy) must be a small part of the image,
+-      // else this game does not draw "scene, then HUD" into its back buffer
+-      if (sTot >= 200 && sHud * 10 > sTot * 4) {
++      uint32_t eA = st[0], hA = st[1], eB = st[2], hB = st[3], sTot = st[4], sHud = st[5], matched = st[16], still = st[17];
++      st[0] = st[1] = st[2] = st[3] = st[4] = st[5] = st[16] = st[17] = 0;
++      static const bool snapDbg = getenv("NV3D_SNAPDBG") != nullptr;
++      if (snapDbg)
++        Log(1, "snapdbg still %u tried %u matched %u+%u n %u cur %u %u %u prev %u %u %u", still, dd->snapTried,
++            dd->snapMatched, matched, st[11], st[8], st[9], st[10], st[12], st[13], st[14]);
++      {
+         std::lock_guard<std::mutex> l(dd->depthLock);
+-        if (!dd->snapBad)
+-          Log(1, "HUD separation: off for now (%.0f%% of the image changed after the copy: not a scene + HUD back buffer)",
+-              100.0 * sHud / sTot);
+-        dd->snapBad = true;
+-        dd->snapBadUntil = frame + 1800;
+-        dd->loggedSnap = false;
++        dd->snapMatched += matched;
++        dd->snapTried -= std::min(dd->snapTried, still);  // still images do not tell
++        // HUD separation sanity: the "HUD" (what changed after the copy) must be a small part of the
++        // image, and some copy must match the frames; else the copy was taken at the wrong point
++        // (automatic: try after the next draw) or this game does not draw "scene, then HUD"
++        const bool tooMuchHud = sTot >= 200 && sHud * 10 > sTot * 4;
++        const bool noMatch = dd->snapTried >= 120 && dd->snapMatched * 5 < dd->snapTried;
++        if (dd->snapTried >= 120 && !tooMuchHud && !noMatch) {
++          if (dd->snapMatched * 10 < dd->snapTried * 9 || dd->traceFrames.load() > 0)
++            Log(1, "HUD separation: a copy matched %u of %u frames (split after back buffer draw %u; %u copies taken)",
++                dd->snapMatched, dd->snapTried, SplitDraw(dd), dd->snapTaken.exchange(0));
++          dd->snapTried = dd->snapMatched = 0;
++          dd->snapTaken = 0;
++        }
++        if ((tooMuchHud || noMatch) && !dd->snapBad) {
++          const char* why = tooMuchHud ? "too much of the image changed after the copy" : "no copy matches the frames";
++          if (Cfg().hudSplit == 0 && dd->autoSplit < 6) {
++            ++dd->autoSplit;
++            Log(1, "HUD separation: %s; now trying the copy after back buffer draw %u", why, dd->autoSplit);
++          } else {
++            Log(1, "HUD separation: off for now (%s: not a scene + HUD back buffer, or another split point is needed: "
++                   "Ctrl+Shift+Scroll Lock)", why);
++            dd->snapBad = true;
++            dd->snapBadUntil = frame + 1800;
++            dd->autoSplit = 1;
++          }
++          dd->loggedSnap = false;
++          dd->snapTried = dd->snapMatched = 0;
++        }
+       }
+       if (eA >= 200 && eB >= 200) {
+         double rA = double(hA) / eA, rB = double(hB) / eB;
+@@ -4519,6 +4696,7 @@ VkResult PresentDepth(DeviceData* dd, VkQueue queue, Swapchain* sc, uint32_t idx
+       }
+     }
+     metaTail[10] = dd->depthFlip;
++    metaTail[11] = Cfg().depthNearest ? 1u : 0u;
+     dd->d.CmdUpdateBuffer(cb, dd->metaBuf, 64, sizeof(metaTail), metaTail);
+     bool on = stages != 0 && pc.depth && dd->depthCopies.load() > 0 && fresh;
+     pc.a = 0.0f;
+@@ -4538,10 +4716,23 @@ VkResult PresentDepth(DeviceData* dd, VkQueue queue, Swapchain* sc, uint32_t idx
+     static const bool show = getenv("NV3D_DEPTH_SHOW") && getenv("NV3D_DEPTH_SHOW")[0] == '1';
+     if (show) pc.maxShift = -1.0f;  // debug: show the captured depth
+     const bool compute = !dd->hybrid || on || show;
++    if (compute && (pc.snapFlags & 1u) && dd->paramBuf) {
++      dd->d.CmdFillBuffer(cb, dd->paramBuf, kStatsOffset + 32, 32, 0);  // this frame's match counters
++      std::lock_guard<std::mutex> l(dd->depthLock);
++      ++dd->snapTried;
++    } else {
++      pc.snapFlags &= ~1u;
++    }
+     if (compute) {
+       BufBarrier(dd, cb, XFER | ALL, VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT, CS,
+                  VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+       const uint32_t gx = (W + 15) / 16, gy = (H + 15) / 16;
++      if (pc.snapFlags & 1u) {  // which copy belongs to this frame (one sample per 16x16 pixels)
++        dd->d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, dd->synthPipe[2]);
++        dd->d.CmdPushConstants(cb, dd->synthLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
++        dd->d.CmdDispatch(cb, (gx + 15) / 16, (gy + 15) / 16, 1);
++        BufBarrier(dd, cb, CS, VK_ACCESS_SHADER_WRITE_BIT, CS, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
++      }
+       for (int pass = 0; pass < 2; ++pass) {
+         dd->d.CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, dd->synthPipe[pass]);
+         dd->d.CmdPushConstants(cb, dd->synthLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+@@ -4595,7 +4786,14 @@ VkResult PresentDepth(DeviceData* dd, VkQueue queue, Swapchain* sc, uint32_t idx
+   Barrier(dd, cb, vi.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, XFER, 0,
+           VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+   // hybrid: the next frame is rendered for the other eye (stereo parameters ordered on the queue)
+-  if (dd->hybrid) UpdateParams(dd, cb, EyeK(frame + 1));
++  if (dd->hybrid) {
++    // flat_menus: screens without a 3D scene (title, menus, loading) are drawn without stereo shift
++    // (games that draw their 2D menus with a perspective camera: they would sit far behind the screen)
++    float kNext = EyeK(frame + 1);
++    const uint64_t ld = dd->lastDepthFrame.load();
++    if (Cfg().flatMenus && (ld == UINT64_MAX || ld + 10 < frame)) kNext = 0.0f;
++    UpdateParams(dd, cb, kNext);
++  }
+   dd->d.EndCommandBuffer(cb);
+ 
+   std::vector<VkPipelineStageFlags> wstages(waitCount, ALL);
+diff --git a/src/shaders/depth3d.comp b/src/shaders/depth3d.comp
+index 5278a47..0186dff 100644
+--- a/src/shaders/depth3d.comp
++++ b/src/shaders/depth3d.comp
+@@ -3,6 +3,9 @@
+ // PASS 1 (resolve): each eye pixel takes the colour of the game pixel that won it; holes
+ //                   (background uncovered by the shift) take the farther neighbour, or in hybrid
+ //                   mode the last real image of that eye (rendered one frame ago from that eye).
++// PASS 2 (match, before PASS 0, only with HUD separation): which of the last copies of the scene
++//                   (taken before the HUD) belongs to this frame: the one equal to the image outside
++//                   the HUD. Games that record on several threads present frames in another order.
+ // Compile: glslangValidator -V --target-env vulkan1.2 -DPASS=0 depth3d.comp (see gen.sh)
+ #version 450
+ #extension GL_EXT_buffer_reference : require
+@@ -16,6 +19,7 @@ layout(push_constant) uniform PC {
+   U32s meta;    // stage s: [4s] Dw [4s+1] Dh [4s+2] format 0 f32, 1 unorm24, 2 unorm16;
+                 // [16+s] A, [20+s] B of its projection (float bits); [24] stages of this frame; [25] stride;
+                 // [26] 1 = the depth is upside down (Unity draws its scene upside down into textures)
++                // [27] 1 = the nearest stage wins (layers: a far-away layer drawn after the main scene)
+   uint W, H;
+   float a, b;   // b != 0: depth available this frame (the projections are in meta)
+   float kL, kR; // per-eye shift at infinity (NDC); 0 = 2D
+@@ -26,8 +30,13 @@ layout(push_constant) uniform PC {
+                 // bit 4 = the real eye (the colour image belongs to it)
+   U32s stats;   // [0..3] orientation test: depth edges / edges also in the colour, normal and flipped;
+                 // [4] [5] HUD separation: samples / samples that are HUD
+-  U32s snap;    // the game's back buffer before the HUD (the scene alone)
+-  uint snapFlags;  // 1 valid, 2 red / blue swapped
++                // [8..10] samples equal to each copy, [11] samples, [12..14] samples where each copy
++                // equals one of the two previous frames' images (this frame, PASS 2)
++                // [16] frames a copy matched, [17] still frames (accumulated, read by the host)
++  U32s snap;    // copies of the game's back buffer before the HUD (the scene alone), snapStride words apart
++  uint snapFlags;  // 1 copies available, 2 red / blue swapped, 4 copies are 10-bit (A2B10G10R10 / A2R10G10B10)
++  uint snapStride;
++  uint snapMask;   // which copy slots hold a recent copy
+ } pc;
+ 
+ // colour unchanged (per 8-bit channel) between this frame and the previous real image of the same eye
+@@ -54,6 +63,8 @@ float DepthAt(uint stage, uint idx, uint fmt) {
+ float InvWFlip(uint x, uint y, uint flip) {
+   if (pc.b == 0.0) return 0.0;
+   uint mask = pc.meta.v[24];
++  bool nearest = pc.meta.v[27] != 0u;
++  float best = 0.0;
+   for (int s = 3; s >= 0; --s) {
+     if ((mask & (1u << uint(s))) == 0u) continue;
+     uint Dw = pc.meta.v[4 * s], Dh = pc.meta.v[4 * s + 1], fmt = pc.meta.v[4 * s + 2];
+@@ -71,9 +82,12 @@ float InvWFlip(uint x, uint y, uint flip) {
+     float z = DepthAt(uint(s), idx, fmt);
+     if (z <= 0.0 || z >= 1.0) continue;  // cleared here (normal or reversed depth): an earlier stage
+     float iw = (z - uintBitsToFloat(pc.meta.v[16 + s])) / uintBitsToFloat(pc.meta.v[20 + s]);
+-    if (iw > 0.0) return min(iw, 1.0e30);
++    if (iw > 0.0) {
++      if (!nearest) return min(iw, 1.0e30);
++      best = max(best, min(iw, 1.0e30));
++    }
+   }
+-  return 0.0;
++  return best;
+ }
+ float InvWAt(uint x, uint y) { return InvWFlip(x, y, pc.meta.v[26]); }
+ 
+@@ -93,26 +107,109 @@ uint Diff(uint a, uint b) {
+   return max(max(d.x, d.y), max(d.z, d.w));
+ }
+ 
+-uint SnapAt(uint i) {
+-  uint c = pc.snap.v[i];
++uint SnapIn(uint slot, uint i) {
++  uint c = pc.snap.v[slot * pc.snapStride + i];
++  if ((pc.snapFlags & 4u) != 0u) {  // 10 bits per channel -> 8 (as the presented image has it)
++    uvec3 t = (uvec3(c, c >> 10, c >> 20) & 1023u) * 255u + 511u;
++    t /= 1023u;
++    c = 0xFF000000u | t.x | (t.y << 8) | (t.z << 16);
++  }
+   if ((pc.snapFlags & 2u) != 0u) c = (c & 0xFF00FF00u) | ((c & 0xFFu) << 16) | ((c >> 16) & 0xFFu);
+   return c;
+ }
++#if PASS != 2
++// the copy of this frame: the one most of the image matches (counted by PASS 2), -1 if none does
++int Slot() {
++  if ((pc.snapFlags & 1u) == 0u) return -1;
++  uint n = pc.stats.v[11], best = 0u;
++  int s = -1;
++  for (uint k = 0u; k < 3u; ++k) {
++    if ((pc.snapMask & (1u << k)) == 0u) continue;
++    uint m = pc.stats.v[8u + k];
++    // hybrid: a copy identical to an earlier frame's finished image holds that frame's HUD (taken too
++    // early, before the scene arrived: the back buffer still had the last frame)
++    if ((pc.hyb & 1u) != 0u && pc.stats.v[12u + k] * 200u >= n * 199u) continue;
++    if (m > best) { best = m; s = int(k); }
++  }
++  return (n > 0u && best * 20u >= n * 11u) ? s : -1;  // 55%: the rest may be HUD
++}
++// a copy is identical to this image: nothing was drawn after it, or the image did not change (it
++// tells nothing about where the copy is taken)
++bool StillMatch() {
++  uint n = pc.stats.v[11];
++  for (uint k = 0u; k < 3u; ++k)
++    if ((pc.snapMask & (1u << k)) != 0u && n > 0u && pc.stats.v[8u + k] * 200u >= n * 199u) return true;
++  return false;
++}
++int gSlot = -1;
++uint SnapAt(uint i) { return SnapIn(uint(gSlot), i); }
+ // drawn after the scene was copied: HUD, crosshair, markers, menus
+ // (the copy and the presented image are the same bytes except where something was drawn after the copy)
+-bool HudAt(uint i) { return (pc.snapFlags & 1u) != 0u && Diff(SnapAt(i), pc.color.v[i]) > 2u; }
++bool HudAt(uint i) { return gSlot >= 0 && Diff(SnapAt(i), pc.color.v[i]) > 2u; }
+ // the colour the eyes are rebuilt from: the scene without HUD when available
+-uint SrcAt(uint i) { return (pc.snapFlags & 1u) != 0u ? SnapAt(i) : pc.color.v[i]; }
++uint SrcAt(uint i) { return gSlot >= 0 ? SnapAt(i) : pc.color.v[i]; }
++#endif
+ 
+ float Luma(uint c) { vec4 v = unpackUnorm4x8(c); return dot(v.rgb, vec3(0.3, 0.59, 0.11)); }
+ 
++#if PASS == 1
++// A HUD pixel at (x, y): F = what the game shows, S = the scene there before the HUD. Translucent
++// panels (a darkening or a whitening over the scene) let the scene through: F = S * k (+ white * (1 - k));
++// opaque HUD (any other colour change) does not. -> true for a translucent panel, with its k and C.
++bool HudFit(uint x, uint y, out float kk, out vec3 C) {
++  uint i0 = y * pc.W + x;
++  vec3 F = unpackUnorm4x8(pc.color.v[i0]).rgb, S = unpackUnorm4x8(SnapAt(i0)).rgb;
++  float lf = dot(F, vec3(0.3, 0.59, 0.11)), ls = dot(S, vec3(0.3, 0.59, 0.11));
++  if (lf <= ls) {
++    kk = lf / max(ls, 1.0e-4);
++    C = vec3(0.0);
++  } else {
++    kk = 1.0 - (lf - ls) / max(1.0 - ls, 1.0e-4);
++    C = vec3(1.0 - kk);
++  }
++  kk = clamp(kk, 0.0, 1.0);
++  vec3 err = abs(F - (S * kk + C));
++  return max(max(err.r, err.g), err.b) <= 0.12;  // (a slight tint is a panel; another colour: opaque HUD)
++}
++// the panel kept, with this eye's scene R seen through it (F + (R - S) * k: the panel's own tint stays)
++uint HudOver(uint x, uint y, uint r) {
++  float kk;
++  vec3 C;
++  uint i0 = y * pc.W + x;
++  if (!HudFit(x, y, kk, C)) return pc.color.v[i0];
++  vec3 F = unpackUnorm4x8(pc.color.v[i0]).rgb, S = unpackUnorm4x8(SnapAt(i0)).rgb, R = unpackUnorm4x8(r).rgb;
++  return packUnorm4x8(vec4(clamp(F + (R - S) * kk, 0.0, 1.0), 1.0));
++}
++#endif
++
+ void main() {
++#if PASS == 2
++  // one invocation per sample of a 16-pixel grid
++  uint x = gl_GlobalInvocationID.x * 16u + 8u, y = gl_GlobalInvocationID.y * 16u + 8u;
++  if (x >= pc.W || y >= pc.H) return;
++  uint i = y * pc.W + x, c = pc.color.v[i];
++  // the previous frames' images: in hybrid, the last real image of each eye (frames N-1 and N-2)
++  uint realE = (pc.hyb >> 4) & 1u, p = pc.prev.v[(1u - realE) * pc.W * pc.H + i];
++  uint q = (pc.hyb & 2u) != 0u ? pc.prev.v[realE * pc.W * pc.H + i] : p;
++  atomicAdd(pc.stats.v[11], 1u);
++  for (uint k = 0u; k < 3u; ++k) {
++    if ((pc.snapMask & (1u << k)) == 0u) continue;
++    uint sk = SnapIn(k, i);
++    if (Diff(sk, c) <= 2u) atomicAdd(pc.stats.v[8u + k], 1u);
++    if ((pc.hyb & 1u) != 0u && (Diff(sk, p) <= 2u || Diff(sk, q) <= 2u)) atomicAdd(pc.stats.v[12u + k], 1u);
++  }
++#else
+   uint x = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y;
+   if (x >= pc.W || y >= pc.H) return;
+   uint WH = pc.W * pc.H;
++  gSlot = Slot();
+ #if PASS == 0
+   bool have = pc.b != 0.0;
+-  if (have && (pc.snapFlags & 1u) != 0u && (x & 7u) == 0u && (y & 7u) == 0u) {
++  if (x == 0u && y == 0u && (pc.snapFlags & 1u) != 0u) {
++    if (gSlot >= 0) atomicAdd(pc.stats.v[16], 1u);
++    else if (StillMatch()) atomicAdd(pc.stats.v[17], 1u);
++  }
++  if (have && gSlot >= 0 && (x & 7u) == 0u && (y & 7u) == 0u) {
+     atomicAdd(pc.stats.v[4], 1u);
+     if (HudAt(y * pc.W + x)) atomicAdd(pc.stats.v[5], 1u);
+   }
+@@ -179,15 +276,16 @@ void main() {
+       pc.outc.v[row + x] = pc.prev.v[row + x];
+       continue;
+     }
+-    if (HudAt(y * pc.W + x) && (pc.hyb == 0u || e != realE)) {
+-      pc.outc.v[row + x] = pc.color.v[y * pc.W + x];  // HUD: on the screen plane, in both eyes
+-      continue;
+-    }
++    bool hud = HudAt(y * pc.W + x) && (pc.hyb == 0u || e != realE);
+     uint key = pc.keys.v[row + x];
+     uint sx = x;
+     if (key == 0u && (pc.hyb & 1u) != 0u) {
+       // hybrid: the uncovered background was really seen by this eye one frame ago
+-      pc.outc.v[row + x] = pc.prev.v[row + x];
++      // (under a translucent HUD panel too: that image has the panel in the same place; under opaque
++      // HUD the HUD of this frame)
++      float kk;
++      vec3 C;
++      pc.outc.v[row + x] = hud && !HudFit(x, y, kk, C) ? pc.color.v[y * pc.W + x] : pc.prev.v[row + x];
+       continue;
+     }
+     if (key == 0u) {
+@@ -214,7 +312,11 @@ void main() {
+       sx = key & 0xFFFu;
+     }
+     uint c = SrcAt(y * pc.W + sx);
+-    if ((pc.snapFlags & 1u) == 0u && (pc.hyb & 1u) != 0u && e != realE && sx != x) {
++    if (hud) {  // HUD: on the screen plane, in both eyes
++      pc.outc.v[row + x] = HudOver(x, y, c);
++      continue;
++    }
++    if (gSlot < 0 && (pc.hyb & 1u) != 0u && e != realE && sx != x) {
+       // HUD, crosshair, markers, menus are drawn after the scene and are not in the depth: they
+       // belong on the screen plane. Evidence: the last real image of this eye. If the pixel left
+       // where it is matches it much better than the rebuilt one, it is screen-plane content.
+@@ -231,4 +333,5 @@ void main() {
+     pc.outc.v[row + x] = c;
+   }
+ #endif
++#endif
+ }
+diff --git a/src/shaders/gen.sh b/src/shaders/gen.sh
+index 5150332..954628b 100755
+--- a/src/shaders/gen.sh
++++ b/src/shaders/gen.sh
+@@ -3,11 +3,11 @@
+ # committed, so building the layer does not need glslang.
+ set -e
+ cd "$(dirname "$0")"
+-for p in 0 1; do glslangValidator -V --target-env vulkan1.2 -DPASS=$p depth3d.comp -o "${TMPDIR:-/tmp}/depth3d_$p.spv" >/dev/null; done
++for p in 0 1 2; do glslangValidator -V --target-env vulkan1.2 -DPASS=$p depth3d.comp -o "${TMPDIR:-/tmp}/depth3d_$p.spv" >/dev/null; done
+ python3 - <<'PY'
+ import os, struct
+ out = ["// generated by src/shaders/gen.sh from depth3d.comp - do not edit", "#pragma once", "#include <cstdint>"]
+-for p, name in ((0, "kDepthSplatSpv"), (1, "kDepthResolveSpv")):
++for p, name in ((0, "kDepthSplatSpv"), (1, "kDepthResolveSpv"), (2, "kDepthMatchSpv")):
+     d = open(os.environ.get("TMPDIR", "/tmp") + f"/depth3d_{p}.spv", "rb").read()
+     w = struct.unpack(f"<{len(d)//4}I", d)
+     out.append(f"static const uint32_t {name}[] = {{")
+diff --git a/src/spirv_patch.cpp b/src/spirv_patch.cpp
+index 3053704..3b1cd37 100644
+--- a/src/spirv_patch.cpp
++++ b/src/spirv_patch.cpp
+@@ -248,7 +248,7 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
+   // projection samples: only at OpReturn sites (splitting a geometry shader's block around
+   // OpEmitVertex could break structured control flow)
+   if (isGeometry) calib = false;
+-  uint32_t idC3 = fresh(), idHalf = fresh();
++  uint32_t idC3 = fresh(), idHalf = fresh(), idMHalf = fresh(), idZeroF = fresh();
+   uint32_t idPtrU64 = 0, idK63 = 0, idK6 = 0, idK255 = 0, idK3 = 0, idK32 = 0, idOff64 = 0, idK7 = 0, idK18 = 0,
+            idK26 = 0, idKMul = 0;
+   if (calib) {
+@@ -303,6 +303,8 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
+       Emit(out, OpConstant, {floatType, idOne, 0x3F800000u});
+       Emit(out, OpConstant, {idU32, idC3, 3});
+       Emit(out, OpConstant, {floatType, idHalf, 0x3F000000u});
++      Emit(out, OpConstant, {floatType, idMHalf, 0xBF000000u});  // -0.5
++      Emit(out, OpConstant, {floatType, idZeroF, 0u});
+       if (calib) {
+         Emit(out, OpTypePointer, {idPtrU64, StoragePhysicalStorageBuffer, idU64});
+         Emit(out, OpConstant, {idU32, idK63, 63});
+@@ -327,8 +329,15 @@ PatchResult PatchStereo(const uint32_t* code, size_t n, const char* entryName, u
+       ++patchSites;
+       uint32_t ptrS = fresh(), pk = fresh(), k = fresh(), pc = fresh(), cv = fresh(), ph = fresh(), hd = fresh();
+       Emit(out, OpConvertUToPtr, {idPtrStruct, ptrS, idAddr});
++      // params.flags < 0: the HUD drawn over the finished scene (depth / hybrid HUD separation):
++      // no stereo shift, it stays on the screen plane in both eyes
++      uint32_t k0 = fresh(), pf0 = fresh(), fl0 = fresh(), noShift = fresh();
+       Emit(out, OpAccessChain, {idPtrFloat, pk, ptrS, idC0});
+-      Emit(out, OpLoad, {floatType, k, pk, MemAligned, 4});
++      Emit(out, OpLoad, {floatType, k0, pk, MemAligned, 4});
++      Emit(out, OpAccessChain, {idPtrFloat, pf0, ptrS, idC3});
++      Emit(out, OpLoad, {floatType, fl0, pf0, MemAligned, 4});
++      Emit(out, OpFOrdLessThan, {idBool, noShift, fl0, idMHalf});
++      Emit(out, OpSelect, {floatType, k, noShift, idZeroF, k0});
+       Emit(out, OpAccessChain, {idPtrFloat, pc, ptrS, idC1});
+       Emit(out, OpLoad, {floatType, cv, pc, MemAligned, 4});
+       Emit(out, OpAccessChain, {idPtrFloat, ph, ptrS, idC2});

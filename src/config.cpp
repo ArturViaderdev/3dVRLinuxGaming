@@ -111,6 +111,13 @@ static void ApplyKey(const char* key, const char* val) {
   else if (!strcmp(key, "overscan") && ParseFloat(val, f)) c.overscan = std::clamp(f, 1.0f, 1.5f);
   else if (!strcmp(key, "depth_clamp") && ParseBool(val, b)) c.depthClamp = b;
   else if (!strcmp(key, "offscreen_mono") && ParseBool(val, b)) c.offscreenMono = b;
+  else if (!strcmp(key, "hud_separation") && ParseBool(val, b)) c.hudSeparation = b;
+  else if (!strcmp(key, "flat_menus") && ParseBool(val, b)) c.flatMenus = b;
+  else if (!strcmp(key, "depth_layers")) c.depthNearest = !strcasecmp(val, "nearest");
+  else if (!strcmp(key, "hud_split")) {
+    if (!strcasecmp(val, "auto")) c.hudSplit = 0;
+    else if (ParseFloat(val, f)) c.hudSplit = std::clamp(int(f), 0, 16);
+  }
   else if (!strcmp(key, "fix_shadows")) {
     if (!strcasecmp(val, "auto")) c.fixShadows = 2;
     else if (ParseBool(val, b)) c.fixShadows = b ? 1 : 0;
@@ -214,7 +221,8 @@ static void LoadEnv() {
       {"VRLINUX_HUD_SCALE", "hud_scale"},     {"VRLINUX_FLIP_Y", "flip_y"},
       {"VRLINUX_RENDER_SIZE", "render_size"}, {"VRLINUX_MIRROR", "mirror"},
       {"VRLINUX_OVERSCAN", "overscan"},       {"VRLINUX_HUD_FOLLOW", "hud_follow"},
-      {"VRLINUX_LOOK_LIMIT", "look_limit"},     {"VRLINUX_DEPTH_CLAMP", "depth_clamp"}, {"VRLINUX_OFFSCREEN_MONO", "offscreen_mono"}, {"VRLINUX_FIX_SHADOWS", "fix_shadows"},
+      {"VRLINUX_LOOK_LIMIT", "look_limit"},     {"VRLINUX_DEPTH_CLAMP", "depth_clamp"}, {"VRLINUX_OFFSCREEN_MONO", "offscreen_mono"}, {"VRLINUX_FIX_SHADOWS", "fix_shadows"}, {"VRLINUX_HUD_SEPARATION", "hud_separation"},
+      {"VRLINUX_HUD_SPLIT", "hud_split"}, {"VRLINUX_FLAT_MENUS", "flat_menus"}, {"VRLINUX_DEPTH_LAYERS", "depth_layers"},
       {"VRLINUX_SCREEN_WIDTH", "screen_width"}, {"VRLINUX_SCREEN_DISTANCE", "screen_distance"},
       {"VRLINUX_SEP", "separation"},          {"VRLINUX_CONV", "convergence"},
       {"VRLINUX_SWAP", "swap_eyes"},          {"VRLINUX_STEREO", "stereo"},
@@ -318,6 +326,10 @@ void SaveConfig() {
           c.positional, c.posLimit, c.fov, c.fovAxis ? "v" : "h", c.worldScale);
   fprintf(f, "hud_follow = %d\nlook_limit = %.1f\n", c.hudFollow, c.lookLimit);
   fprintf(f, "fix_shadows = %s\n", c.fixShadows == 2 ? "auto" : c.fixShadows ? "1" : "0");
+  fprintf(f, "hud_separation = %d\n", c.hudSeparation ? 1 : 0);
+  if (c.hudSplit > 0) fprintf(f, "hud_split = %d\n", c.hudSplit);
+  else fprintf(f, "hud_split = auto\n");
+  fprintf(f, "flat_menus = %d\ndepth_layers = %s\n", c.flatMenus ? 1 : 0, c.depthNearest ? "nearest" : "latest");
   fprintf(f, "flip_y = %s\noverscan = %.3f\ndepth_clamp = %d\noffscreen_mono = %d\nmirror = %d\n",
           c.flipY < 0 ? "auto" : c.flipY ? "1" : "0", c.overscan, c.depthClamp, c.offscreenMono, c.mirror);
   if (c.renderW < 0) fprintf(f, "render_size = auto\n");
@@ -349,14 +361,14 @@ struct X11 {
   unsigned char (*KeysymToKeycode)(void*, unsigned long) = nullptr;
   bool tried = false;
   bool ok = false;
-  unsigned char kc[24] = {};
+  unsigned char kc[32] = {};  // (one per Key)
 };
 X11 g_x;
 
 enum Key { kCtrlL, kCtrlR, kShiftL, kShiftR, kF1, kF2, kF3, kF4, kF5, kF6, kF7, kF8, kF9, kF10, kF11,
-           kPgUp, kPgDn, kHome, kEnd, kIns, kDel, kPause, kCount };
+           kPgUp, kPgDn, kHome, kEnd, kIns, kDel, kPause, kScroll, kCount };
 const unsigned long kSyms[kCount] = {0xFFE3, 0xFFE4, 0xFFE1, 0xFFE2, 0xFFBE, 0xFFBF, 0xFFC0, 0xFFC1, 0xFFC2, 0xFFC3,
-                                     0xFFC4, 0xFFC5, 0xFFC6, 0xFFC7, 0xFFC8, 0xFF55, 0xFF56, 0xFF50, 0xFF57, 0xFF63, 0xFFFF, 0xFF13};
+                                     0xFFC4, 0xFFC5, 0xFFC6, 0xFFC7, 0xFFC8, 0xFF55, 0xFF56, 0xFF50, 0xFF57, 0xFF63, 0xFFFF, 0xFF13, 0xFF14};
 
 bool InitX11() {
   if (g_x.tried) return g_x.ok;
@@ -374,7 +386,7 @@ bool InitX11() {
   Log(1, "hotkeys (Ctrl+Shift+): F1/F2 FOV -/+ | F3/F4 world scale (screen: separation) | F5/F6 mouse sens "
          "(screen: convergence) | F7 swap eyes | F8 3D on/off | F9 save | F10 screen/immersive | F11 head rotation on/off | "
          "Home recenter | End positional on/off | PgUp/PgDn HUD (screen: distance) | Insert HUD follows head | "
-         "Delete head turn limit | Pause shadow fix on/off");
+         "Delete head turn limit | Pause shadow fix on/off | Scroll Lock HUD separation (off / auto / split 1-6)");
   return true;
 }
 
@@ -453,6 +465,15 @@ bool PollControls() {
     c.fixShadowsOn = !c.fixShadowsOn;
     changed = true;
     Log(1, "fix_shadows corrections %s", c.fixShadowsOn ? "ON" : "OFF");
+  }
+  if (pressed(kScroll)) {  // HUD separation: off -> automatic -> after draw 1, 2 ... 6 -> off
+    if (!c.hudSeparation) c.hudSeparation = true, c.hudSplit = 0;
+    else if (c.hudSplit < 6) ++c.hudSplit;
+    else c.hudSeparation = false, c.hudSplit = 0;
+    changed = true;
+    if (!c.hudSeparation) Log(1, "HUD separation: off");
+    else if (!c.hudSplit) Log(1, "HUD separation: on, automatic split point");
+    else Log(1, "HUD separation: on, copy after back buffer draw %d", c.hudSplit);
   }
   if (pressed(kEnd)) { c.positional = !c.positional; changed = true; Log(1, "positional=%d", c.positional); }
   static bool wasAdjusting = false;

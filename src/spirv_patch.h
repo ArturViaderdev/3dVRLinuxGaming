@@ -30,7 +30,8 @@ enum class PatchResult { Patched, NoPosition, NoEntryPoint, Unsupported, Error }
 // perspective vertices into the parameter buffer (8-byte slots at paramAddress + kCalibOffset)
 // while the float at paramAddress + kCalibFlagOffset is > 0.5 (1 + scene stage), so the layer can
 // recover the projection's depth mapping (needs vertexPipelineStoresAndAtomics).
-constexpr uint32_t kCalibFlagOffset = 96;
+constexpr uint32_t kCalibFlagOffset = 96;  // also < -0.5: HUD passes use the parameters at kHudParamsOffset
+constexpr uint32_t kHudParamsOffset = 384;
 constexpr uint32_t kCalibOffset = 1024;
 constexpr uint32_t kCalibSlots = 256;   // 4 stages of 64
 constexpr uint32_t kCalibGroupSlots = 64;

@@ -86,6 +86,7 @@ Keyboard (**Ctrl + Shift + …**; keys can be held to change values continuously
 | Insert | HUD fixed with the game ⇄ HUD follows your head | — |
 | Delete | head turn limit: off → 30° → 45° → 60° → 90° → off | — |
 | Pause | shadow fix (`fix_shadows`) on/off, to compare | same |
+| Scroll Lock | depth / hybrid: HUD separation off → automatic → copy after draw 1 … 6 → off (`hud_separation`, `hud_split`) | same |
 | PgUp / PgDn | HUD closer / farther | screen closer / farther |
 | Home | recenter | recenter |
 | End | head movement (6DOF) on/off | — |
@@ -142,6 +143,10 @@ Main options:
 - In both modes the two eyes share one frustum (the union of the headset's two), so an eye can be rebuilt from the other by horizontal shifts; this works with head rotation (`head_look`) and in screen mode too.
 - Effects that do not write depth (lasers, smoke, some particles) can be misplaced in the rebuilt eye. `VRLINUX_DEPTH_SHOW=1` shows the captured depth as grey in both eyes (debug).
 - Log line: `hybrid: eyes rebuilt from depth N of M frames`.
+- **Scene stages**: each clear of the scene depth starts a stage with its own projection, and so does going on in another depth image; a pass that goes back to the image of an earlier stage continues that stage (EDF 6 draws a far-away layer in a second depth image, with another camera, in the middle of the main scene). Where several stages have depth the latest one wins; `depth_layers = nearest` (per game, EDF 6) takes the nearest instead, for far-away layers drawn after the main scene.
+- `flat_menus = 1` (hybrid, per game): screens without a 3D scene (title, menus, loading) are drawn from the middle of the eyes, for games whose 2D menus would otherwise sit far away (EDF 6).
+- **HUD separation** (experimental, off by default: `hud_separation = 1` in the game's profile, or Ctrl+Shift+Scroll Lock): DXVK / VKD3D games draw the finished scene into their back buffer and the HUD on top. The layer finds that image, copies it right after the scene arrived and rebuilds the eyes from the scene alone; the HUD, crosshair, markers and menus stay exactly where the game draws them, the same in both eyes, and the HUD passes are drawn from the middle of the eyes in the real eye too (games such as EDF 6 draw the HUD with a perspective camera). The copies of the last 3 frames are kept and each frame uses the one that matches the image outside the HUD (games that record on several threads present their frames in another order). Translucent HUD panels keep showing each eye's scene through them. 8-bit and 10-bit back buffers, with or without MSAA. The copy is taken after the first draw into the back buffer; if the copies do not fit the frames the layer tries after the 2nd, 3rd... draw by itself (log: `now trying the copy after back buffer draw N`) and switches the separation off for a while if none fits. Ctrl+Shift+Scroll Lock cycles off → automatic → after draw 1 … 6; Ctrl+Shift+F9 saves it (`hud_separation`, `hud_split`). The log says `HUD separation: on`.
+- Draws batched by DXVK (`vkCmdDrawMultiEXT`) are counted: without that, DXVK games could look like they had no 3D scene.
 
 Environment variables (highest priority): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`, `VRLINUX_LOOK`, `VRLINUX_FOV`, `VRLINUX_WORLD_SCALE`, `VRLINUX_SEP`, `VRLINUX_CONV`, `VRLINUX_RENDER_SIZE`, `VRLINUX_MIRROR`, `VRLINUX_MODE`, `VRLINUX_HIDE_EXT`, `VRLINUX_LOOK_LIMIT`, `VRLINUX_HUD_FOLLOW`, `VRLINUX_SCREEN_WIDTH`, `VRLINUX_SCREEN_DISTANCE`, `VRLINUX_LOG_LEVEL`, `VRLINUX_IGNORE=Launcher.exe`. Launcher: `VRLINUX_RUNTIME=steamvr|wivrn|/path/runtime.json`.
 
@@ -255,6 +260,7 @@ Teclado (**Ctrl + Shift + …**; se pueden mantener pulsadas para cambiar valore
 | Insert | HUD fijo con el juego ⇄ HUD sigue a la cabeza | — |
 | Supr | límite de giro de cabeza: sin límite → 30° → 45° → 60° → 90° → sin límite | — |
 | Pausa | arreglo de sombras (`fix_shadows`) sí/no, para comparar | igual |
+| Bloq Despl | depth / hybrid: separación del HUD desactivada → automática → copia tras el dibujo 1 … 6 → desactivada (`hud_separation`, `hud_split`) | igual |
 | RePág / AvPág | HUD más cerca / más lejos | pantalla más cerca / más lejos |
 | Inicio | recentrar | recentrar |
 | Fin | movimiento de cabeza (6DOF) sí/no | — |
@@ -311,6 +317,10 @@ Opciones principales:
 - En los dos modos los dos ojos comparten un mismo campo de visión (la unión de los dos del visor), así que un ojo se puede reconstruir desde el otro con desplazamientos horizontales; funciona con el giro de cabeza (`head_look`) y también en modo pantalla.
 - Los efectos que no escriben profundidad (láseres, humo, algunas partículas) pueden quedar mal colocados en el ojo reconstruido. `VRLINUX_DEPTH_SHOW=1` muestra la profundidad capturada en gris en los dos ojos (depuración).
 - Línea del registro: `hybrid: eyes rebuilt from depth N of M frames`.
+- **Etapas de la escena**: cada vez que se borra la profundidad de la escena empieza una etapa con su propia proyección, y también al seguir en otra imagen de profundidad; un pase que vuelve a la imagen de una etapa anterior continúa esa etapa (EDF 6 dibuja una capa lejana en una segunda imagen de profundidad, con otra cámara, en mitad de la escena principal). Donde varias etapas tienen profundidad gana la última; `depth_layers = nearest` (por juego, EDF 6) toma la más cercana, para capas lejanas dibujadas después de la escena principal.
+- `flat_menus = 1` (hybrid, por juego): las pantallas sin escena 3D (título, menús, cargas) se dibujan desde el centro de los ojos, para juegos cuyos menús 2D quedarían muy lejos (EDF 6).
+- **Separación del HUD** (experimental, desactivada por defecto: `hud_separation = 1` en el perfil del juego, o Ctrl+Shift+Bloq Despl): los juegos con DXVK / VKD3D dibujan la escena terminada en su back buffer y el HUD encima. La capa encuentra esa imagen, la copia justo después de que llegue la escena y reconstruye los ojos solo con la escena; el HUD, la mira, los marcadores y los menús quedan exactamente donde los dibuja el juego, igual en los dos ojos, y las pasadas del HUD se dibujan desde el centro de los ojos también en el ojo real (juegos como EDF 6 dibujan el HUD con una cámara en perspectiva). Se guardan las copias de los 3 últimos fotogramas y en cada fotograma se usa la que coincide con la imagen fuera del HUD (los juegos que graban en varios hilos presentan sus fotogramas en otro orden). Los paneles translúcidos del HUD siguen dejando ver la escena de cada ojo. Back buffers de 8 y 10 bits, con o sin MSAA. La copia se toma tras el primer dibujo en el back buffer; si las copias no encajan con los fotogramas, la capa prueba sola tras el 2º, 3º... dibujo (registro: `now trying the copy after back buffer draw N`) y desactiva la separación un rato si ninguno encaja. Ctrl+Shift+Bloq Despl pasa por desactivada → automática → tras el dibujo 1 … 6; Ctrl+Shift+F9 lo guarda (`hud_separation`, `hud_split`). El registro dice `HUD separation: on`.
+- Se cuentan los dibujos que DXVK agrupa (`vkCmdDrawMultiEXT`): sin eso, los juegos de DXVK podían parecer sin escena 3D.
 
 Variables de entorno (máxima prioridad): `VRLINUX_DISPLAY`, `VRLINUX_HEAD_LOOK`, `VRLINUX_LOOK`, `VRLINUX_FOV`, `VRLINUX_WORLD_SCALE`, `VRLINUX_SEP`, `VRLINUX_CONV`, `VRLINUX_RENDER_SIZE`, `VRLINUX_MIRROR`, `VRLINUX_MODE`, `VRLINUX_HIDE_EXT`, `VRLINUX_LOOK_LIMIT`, `VRLINUX_HUD_FOLLOW`, `VRLINUX_SCREEN_WIDTH`, `VRLINUX_SCREEN_DISTANCE`, `VRLINUX_LOG_LEVEL`, `VRLINUX_IGNORE=Launcher.exe`. Lanzador: `VRLINUX_RUNTIME=steamvr|wivrn|/ruta/runtime.json`.
 

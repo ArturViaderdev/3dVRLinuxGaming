@@ -102,6 +102,18 @@ stereo = 1
 # depth     = cada fotograma se dibuja una vez y los dos ojos se reconstruyen con su profundidad (mas halos)
 # alternate = un fotograma para cada ojo (la mitad de fps por ojo)
 # hybrid y depth necesitan DXVK / VKD3D-Proton (juegos de Proton)
+# depth / hybrid: separacion del HUD (experimental). Los ojos se reconstruyen con una copia de la escena
+# tomada antes del HUD, y el HUD queda donde lo dibuja el juego, igual en los dos ojos. 0 = no, 1 = si
+hud_separation = 0
+# tras que dibujo en el back buffer se toma la copia: auto (empieza en 1 y prueba los siguientes) o 1..16.
+# Ctrl+Shift+Bloq Despl: desactivada -> auto -> 1 ... 6 -> desactivada
+hud_split = auto
+# hybrid: pantallas sin escena 3D (titulo, menus, cargas) dibujadas desde el centro de los ojos (1), para
+# juegos cuyos menus 2D quedan muy lejos (EDF 6). 0 = como el resto
+flat_menus = 0
+# depth / hybrid: donde varias etapas de la escena tienen profundidad gana la ultima (latest) o la mas
+# cercana (nearest: capas lejanas dibujadas despues de la escena principal, EDF 6)
+depth_layers = latest
 mode = replay
 auto_switch = 1
 # Limite de FPS del juego: auto = frecuencia del visor (72/90/120 Hz) | off | numero
